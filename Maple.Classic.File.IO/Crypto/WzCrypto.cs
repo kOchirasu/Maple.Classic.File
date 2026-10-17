@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Numerics;
 
 namespace Maple.Classic.File.IO.Crypto;
 
@@ -19,9 +18,12 @@ internal static class WzCrypto {
     public static ReadOnlySpan<byte> Magic => "PKG1"u8;
 
     public static uint VersionHash(ushort version) {
+        Span<char> digits = stackalloc char[8];
+        version.TryFormat(digits, out int written, provider: CultureInfo.InvariantCulture);
+
         uint sum = 0;
-        foreach (char ch in version.ToString(CultureInfo.InvariantCulture)) {
-            sum = unchecked(sum * 32u + ch + 1u);
+        for (int i = 0; i < written; i++) {
+            sum = unchecked(sum * 32u + digits[i] + 1u);
         }
         return sum;
     }
@@ -40,7 +42,7 @@ internal static class WzCrypto {
         uint o = unchecked(fieldPos - fstart) ^ uint.MaxValue;
         o = unchecked(o * versionHash);
         o = unchecked(o - OffsetMagic);
-        o = BitOperations.RotateLeft(o, (int) (o & 0x1Fu));
+        o = uint.RotateLeft(o, (int) (o & 0x1Fu));
         o ^= encrypted;
         o = unchecked(o + unchecked(fstart * 2u));
         return o;
@@ -50,7 +52,7 @@ internal static class WzCrypto {
         uint o = unchecked(fieldPos - fstart) ^ uint.MaxValue;
         o = unchecked(o * versionHash);
         o = unchecked(o - OffsetMagic);
-        o = BitOperations.RotateLeft(o, (int) (o & 0x1Fu));
+        o = uint.RotateLeft(o, (int) (o & 0x1Fu));
         return o ^ unchecked(real - unchecked(fstart * 2u));
     }
 

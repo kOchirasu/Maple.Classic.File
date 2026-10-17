@@ -7,25 +7,16 @@ namespace Maple.Classic.File.IO;
 /// <summary>
 /// Internal cursor over a WZ archive or image buffer: primitives, obfuscated strings, and encrypted offsets.
 /// </summary>
-internal class WzReader {
-    public byte[] Data { get; }
+internal class WzReader(byte[] data, uint fstart = 0, uint versionHash = 0) {
+    public byte[] Data { get; } = data ?? throw new ArgumentNullException(nameof(data));
     public int Position { get; private set; }
-    public uint FStart { get; }
-    public uint VersionHash { get; }
+    public uint FStart { get; } = fstart;
+    public uint VersionHash { get; } = versionHash;
 
     public int Remaining => Math.Max(0, Data.Length - Position);
 
-    public WzReader(byte[] data, uint fstart = 0, uint versionHash = 0) {
-        Data = data ?? throw new ArgumentNullException(nameof(data));
-        Position = 0;
-        FStart = fstart;
-        VersionHash = versionHash;
-    }
-
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void Seek(int pos) {
-        Position = pos;
-    }
+    public void Seek(int pos) => Position = pos;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void Need(int n) {
@@ -41,9 +32,7 @@ internal class WzReader {
         return slice;
     }
 
-    public byte[] ReadBytes(int n) {
-        return Take(n).ToArray();
-    }
+    public byte[] ReadBytes(int n) => [.. Take(n)];
 
     public byte ReadByte() {
         Need(1);
@@ -52,63 +41,39 @@ internal class WzReader {
 
     public byte U8() => ReadByte();
 
-    public sbyte ReadSByte() {
-        return unchecked((sbyte) ReadByte());
-    }
+    public sbyte ReadSByte() => unchecked((sbyte) ReadByte());
 
     public sbyte I8() => ReadSByte();
 
-    public ushort ReadUInt16() {
-        ReadOnlySpan<byte> b = Take(2);
-        return BinaryPrimitives.ReadUInt16LittleEndian(b);
-    }
+    public ushort ReadUInt16() => BinaryPrimitives.ReadUInt16LittleEndian(Take(2));
 
     public ushort U16() => ReadUInt16();
 
-    public short ReadInt16() {
-        ReadOnlySpan<byte> b = Take(2);
-        return BinaryPrimitives.ReadInt16LittleEndian(b);
-    }
+    public short ReadInt16() => BinaryPrimitives.ReadInt16LittleEndian(Take(2));
 
     public short I16() => ReadInt16();
 
-    public uint ReadUInt32() {
-        ReadOnlySpan<byte> b = Take(4);
-        return BinaryPrimitives.ReadUInt32LittleEndian(b);
-    }
+    public uint ReadUInt32() => BinaryPrimitives.ReadUInt32LittleEndian(Take(4));
 
     public uint U32() => ReadUInt32();
 
-    public int ReadInt32() {
-        ReadOnlySpan<byte> b = Take(4);
-        return BinaryPrimitives.ReadInt32LittleEndian(b);
-    }
+    public int ReadInt32() => BinaryPrimitives.ReadInt32LittleEndian(Take(4));
 
     public int I32() => ReadInt32();
 
-    public ulong ReadUInt64() {
-        ReadOnlySpan<byte> b = Take(8);
-        return BinaryPrimitives.ReadUInt64LittleEndian(b);
-    }
+    public ulong ReadUInt64() => BinaryPrimitives.ReadUInt64LittleEndian(Take(8));
 
     public ulong U64() => ReadUInt64();
 
-    public long ReadInt64() {
-        ReadOnlySpan<byte> b = Take(8);
-        return BinaryPrimitives.ReadInt64LittleEndian(b);
-    }
+    public long ReadInt64() => BinaryPrimitives.ReadInt64LittleEndian(Take(8));
 
     public long I64() => ReadInt64();
 
-    public float ReadSingle() {
-        return BitConverter.UInt32BitsToSingle(ReadUInt32());
-    }
+    public float ReadSingle() => BitConverter.UInt32BitsToSingle(ReadUInt32());
 
     public float F32() => ReadSingle();
 
-    public double ReadDouble() {
-        return BitConverter.UInt64BitsToDouble(ReadUInt64());
-    }
+    public double ReadDouble() => BitConverter.UInt64BitsToDouble(ReadUInt64());
 
     public double F64() => ReadDouble();
 
@@ -140,37 +105,37 @@ internal class WzReader {
         }
 
         if (tag < 0) {
-            int n = tag == sbyte.MinValue ? ReadInt32() : -(int) tag;
+            int n = tag == sbyte.MinValue ? ReadInt32() : -tag;
             if (n < 0) {
                 throw WzException.UnexpectedEof(Position, int.MaxValue, Remaining);
             }
 
             ReadOnlySpan<byte> raw = Take(n);
-            char[] chars = new char[n];
-            for (int k = 0; k < n; k++) {
-                byte decoded = (byte) (raw[k] ^ unchecked((byte) (WzCrypto.AsciiMask + (byte) k)));
-                chars[k] = (char) decoded;
-            }
-            return new string(chars);
+            return string.Create(n, raw, static (chars, src) => {
+                for (int k = 0; k < chars.Length; k++) {
+                    chars[k] = (char) (src[k] ^ unchecked((byte) (WzCrypto.AsciiMask + (byte) k)));
+                }
+            });
         } else {
             int n = tag == 127 ? ReadInt32() : tag;
-            if (n < 0 || n > int.MaxValue / 2) {
+            if (n is < 0 or > int.MaxValue / 2) {
                 throw WzException.UnexpectedEof(Position, int.MaxValue, Remaining);
             }
 
             int start = Position;
             ReadOnlySpan<byte> raw = Take(n * 2);
-            char[] units = new char[n];
-            for (int k = 0; k < n; k++) {
-                ushort u = BinaryPrimitives.ReadUInt16LittleEndian(raw.Slice(k * 2, 2));
-                units[k] = (char) (u ^ unchecked((ushort) (WzCrypto.UnicodeMask + (ushort) k)));
-            }
+            string result = string.Create(n, raw, static (units, src) => {
+                for (int k = 0; k < units.Length; k++) {
+                    ushort u = BinaryPrimitives.ReadUInt16LittleEndian(src.Slice(k * 2, 2));
+                    units[k] = (char) (u ^ unchecked((ushort) (WzCrypto.UnicodeMask + (ushort) k)));
+                }
+            });
 
-            if (!IsValidUtf16(units)) {
+            if (!IsValidUtf16(result)) {
                 throw WzException.BadUtf16(start);
             }
 
-            return new string(units);
+            return result;
         }
     }
 

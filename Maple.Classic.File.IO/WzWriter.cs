@@ -10,30 +10,22 @@ internal sealed record WzImageEntry(string Name, byte[] Bytes);
 /// <summary>
 /// Internal byte-level WZ encoders and archive builder.
 /// </summary>
-internal class WzWriter {
-    private readonly List<byte> buf;
+internal class WzWriter(int capacity = 256) {
+    private readonly List<byte> buf = new(capacity);
 
     public int Length => buf.Count;
-
-    public WzWriter(int capacity = 256) {
-        buf = new List<byte>(capacity);
-    }
 
     public ReadOnlySpan<byte> AsSpan() => CollectionsMarshal.AsSpan(buf);
 
     public Span<byte> AsMutableSpan() => CollectionsMarshal.AsSpan(buf);
 
-    public byte[] ToArray() => buf.ToArray();
+    public byte[] ToArray() => [.. buf];
 
-    public void WriteByte(byte v) {
-        buf.Add(v);
-    }
+    public void WriteByte(byte v) => buf.Add(v);
 
     public void U8(byte v) => WriteByte(v);
 
-    public void WriteBytes(ReadOnlySpan<byte> bytes) {
-        buf.AddRange(bytes);
-    }
+    public void WriteBytes(ReadOnlySpan<byte> bytes) => buf.AddRange(bytes);
 
     public void WriteUInt16(ushort v) {
         Span<byte> tmp = stackalloc byte[2];
@@ -75,14 +67,12 @@ internal class WzWriter {
 
     public void U64(ulong v) => WriteUInt64(v);
 
-    public void WriteDouble(double v) {
-        WriteUInt64(BitConverter.DoubleToUInt64Bits(v));
-    }
+    public void WriteDouble(double v) => WriteUInt64(BitConverter.DoubleToUInt64Bits(v));
 
     public void F64(double v) => WriteDouble(v);
 
     public void WriteCompressedInt32(int v) {
-        if (v > sbyte.MinValue && v <= sbyte.MaxValue) {
+        if (v is > sbyte.MinValue and <= sbyte.MaxValue) {
             WriteByte(unchecked((byte) (sbyte) v));
         } else {
             WriteByte(0x80);
@@ -93,7 +83,7 @@ internal class WzWriter {
     public void CompressedI32(int v) => WriteCompressedInt32(v);
 
     public void WriteCompressedInt64(long v) {
-        if (v > sbyte.MinValue && v <= sbyte.MaxValue) {
+        if (v is > sbyte.MinValue and <= sbyte.MaxValue) {
             WriteByte(unchecked((byte) (sbyte) v));
         } else {
             WriteByte(0x80);
@@ -120,15 +110,7 @@ internal class WzWriter {
             return;
         }
 
-        bool isAscii = true;
-        foreach (char c in s) {
-            if (c >= 0x80) {
-                isAscii = false;
-                break;
-            }
-        }
-
-        if (isAscii) {
+        if (Ascii.IsValid(s)) {
             int n = s.Length;
             if (n >= 128) {
                 WriteByte(0x80);

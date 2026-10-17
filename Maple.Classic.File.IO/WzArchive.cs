@@ -15,12 +15,10 @@ public enum WzNodeKind {
 }
 
 public class WzNode : IEnumerable<WzNode> {
-    private readonly List<WzNode> children;
-
     public string Name { get; }
     public WzNodeKind Kind { get; }
     public int Size { get; }
-    public IReadOnlyList<WzNode> Children => children;
+    public IReadOnlyList<WzNode> Children => MutableChildren;
 
     public bool IsDir => Kind == WzNodeKind.Directory;
     public bool IsImage => Kind == WzNodeKind.Image;
@@ -28,7 +26,7 @@ public class WzNode : IEnumerable<WzNode> {
     internal uint Offset { get; }
     internal int Checksum { get; }
     internal WzArchive? Archive { get; set; }
-    internal List<WzNode> MutableChildren => children;
+    internal List<WzNode> MutableChildren { get; set => field = value ?? []; }
 
     internal WzNode(
         string name,
@@ -43,21 +41,26 @@ public class WzNode : IEnumerable<WzNode> {
         Offset = offset;
         Size = size;
         Checksum = checksum;
-        this.children = children ?? [];
+        MutableChildren = children ?? [];
         Archive = archive;
     }
 
-    public WzNode? this[string path] => Get(path);
+    public WzNode? this[ReadOnlySpan<char> path] => Get(path);
 
     /// <summary>
-    /// Walks to a descendant node by <c>/</c>-separated path.
+    /// Walks to a descendant node by <c>/</c>-separated path with zero intermediate string allocations.
     /// </summary>
-    public WzNode? Get(string path) {
+    public WzNode? Get(ReadOnlySpan<char> path) {
         WzNode cur = this;
-        foreach (string part in path.Split('/', StringSplitOptions.RemoveEmptyEntries)) {
+        foreach (Range range in path.Split('/')) {
+            ReadOnlySpan<char> part = path[range];
+            if (part.IsEmpty) {
+                continue;
+            }
+
             WzNode? next = null;
-            foreach (WzNode child in cur.children) {
-                if (child.Name == part) {
+            foreach (WzNode child in cur.MutableChildren) {
+                if (child.Name.AsSpan().SequenceEqual(part)) {
                     next = child;
                     break;
                 }
@@ -96,7 +99,7 @@ public class WzNode : IEnumerable<WzNode> {
     public (int Directories, int Images) CountRecursive() {
         int dirs = 0;
         int imgs = 0;
-        foreach (WzNode c in children) {
+        foreach (WzNode c in MutableChildren) {
             if (c.Kind == WzNodeKind.Directory) {
                 dirs++;
             } else {
@@ -109,7 +112,7 @@ public class WzNode : IEnumerable<WzNode> {
         return (dirs, imgs);
     }
 
-    public IEnumerator<WzNode> GetEnumerator() => children.GetEnumerator();
+    public IEnumerator<WzNode> GetEnumerator() => MutableChildren.GetEnumerator();
 
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 }
@@ -165,36 +168,20 @@ public class WzArchive : IDisposable {
         AttachArchive(Root);
     }
 
-    /// <summary>
-    /// Opens a WZ archive from disk, detecting the version automatically unless <paramref name="version"/> is specified.
-    /// </summary>
     public static WzArchive Open(string path, ushort? version = null) => new(path, version);
 
-    /// <summary>
-    /// Opens the standalone <c>&lt;Tree&gt;_000.wz</c> archive for a data tree directory (e.g. <c>OpenTree("Data", "String")</c>).
-    /// </summary>
     public static WzArchive OpenTree(string dataDir, string tree, ushort? version = null) =>
         new(TreeArchivePath(dataDir, tree), version);
 
-    /// <summary>
-    /// Parses a WZ archive directly from an in-memory byte array.
-    /// </summary>
     public static WzArchive FromBytes(byte[] data, string name = "", ushort? version = null) {
         ArgumentNullException.ThrowIfNull(data);
         return new WzArchive(data, name, version, "");
     }
 
-    /// <summary>
-    /// Returns the <c>&lt;Tree&gt;_000.wz</c> archive path for a data tree directory.
-    /// </summary>
-    public static string TreeArchivePath(string dataDir, string tree) {
-        return System.IO.Path.Combine(dataDir, tree, $"{tree}_000.wz");
-    }
+    public static string TreeArchivePath(string dataDir, string tree) =>
+        System.IO.Path.Combine(dataDir, tree, $"{tree}_000.wz");
 
-    /// <summary>
-    /// Looks up a directory or image node by <c>/</c>-separated path from the archive root.
-    /// </summary>
-    public WzNode? this[string path] => Root.Get(path);
+    public WzNode? this[ReadOnlySpan<char> path] => Root.Get(path);
 
     /// <summary>
     /// Resolves an image node by <c>/</c>-separated path and parses its property tree.
@@ -210,8 +197,8 @@ public class WzArchive : IDisposable {
 
         int imgIdx = path.IndexOf(".img/", StringComparison.Ordinal);
         if (imgIdx >= 0) {
-            string imgPath = path[..(imgIdx + 4)];
-            string subPath = path[(imgIdx + 5)..];
+            ReadOnlySpan<char> imgPath = path.AsSpan(0, imgIdx + 4);
+            ReadOnlySpan<char> subPath = path.AsSpan(imgIdx + 5);
             WzNode node = Root.Get(imgPath)
                 ?? throw new KeyNotFoundException($"No image node found at path \"{imgPath}\".");
             WzValue rootVal = ParseImage(node);
@@ -222,16 +209,8 @@ public class WzArchive : IDisposable {
         throw new KeyNotFoundException($"No node found at path \"{path}\".");
     }
 
-    /// <summary>
-    /// Parses the property tree of an image node.
-    /// </summary>
-    public WzValue ParseImage(WzNode node) {
-        return WzImage.Parse(ImageBytes(node));
-    }
+    public WzValue ParseImage(WzNode node) => WzImage.Parse(ImageBytes(node));
 
-    /// <summary>
-    /// Returns a <see cref="ReadOnlySpan{T}"/> over the raw bytes of an image node.
-    /// </summary>
     public ReadOnlySpan<byte> GetImageSpan(WzNode node) {
         ArgumentNullException.ThrowIfNull(node);
         long start = node.Offset;
@@ -243,25 +222,14 @@ public class WzArchive : IDisposable {
         return Data.AsSpan((int) start, (int) size);
     }
 
-    /// <summary>
-    /// Returns a copy of the raw bytes of an image node.
-    /// </summary>
-    public byte[] ImageBytes(WzNode node) {
-        return GetImageSpan(node).ToArray();
-    }
+    public byte[] ImageBytes(WzNode node) => [.. GetImageSpan(node)];
 
-    /// <summary>
-    /// Stages an updated or new image in this archive for subsequent <see cref="ToBytes"/> or <see cref="Save"/> calls.
-    /// </summary>
     public void SetImage(string name, WzValue image) {
         ArgumentException.ThrowIfNullOrEmpty(name);
         ArgumentNullException.ThrowIfNull(image);
         SetImage(name, image.ToBytes());
     }
 
-    /// <summary>
-    /// Stages raw <c>.img</c> bytes by image name for subsequent <see cref="ToBytes"/> or <see cref="Save"/> calls.
-    /// </summary>
     public void SetImage(string name, byte[] imageBytes) {
         ArgumentException.ThrowIfNullOrEmpty(name);
         ArgumentNullException.ThrowIfNull(imageBytes);
@@ -269,9 +237,6 @@ public class WzArchive : IDisposable {
         stagedAdditions.Add(new WzImageEntry(name, imageBytes));
     }
 
-    /// <summary>
-    /// Marks an image for removal when <see cref="ToBytes"/> or <see cref="Save"/> is called.
-    /// </summary>
     public bool RemoveImage(string name) {
         ArgumentException.ThrowIfNullOrEmpty(name);
         int removedStaged = stagedAdditions.RemoveAll(e => e.Name == name);
@@ -282,9 +247,6 @@ public class WzArchive : IDisposable {
         return removedStaged > 0 || existsInBase;
     }
 
-    /// <summary>
-    /// Serializes the archive (including any staged image modifications) into a verified WZ archive byte array.
-    /// </summary>
     public byte[] ToBytes(ushort? version = null) {
         ushort targetVersion = version ?? Version;
         List<WzImageEntry> baseImages = WzWriter.ArchiveImages(this);
@@ -294,9 +256,6 @@ public class WzArchive : IDisposable {
         return bytes;
     }
 
-    /// <summary>
-    /// Saves the archive (including any staged image modifications) to disk at <paramref name="path"/>.
-    /// </summary>
     public void Save(string path, ushort? version = null) {
         ArgumentException.ThrowIfNullOrEmpty(path);
         byte[] bytes = ToBytes(version);
@@ -427,8 +386,7 @@ public class WzArchive : IDisposable {
                 return (name, kind);
             }
 
-            case 3:
-            case 4: {
+            case 3 or 4: {
                 string name = r.ReadString();
                 WzNodeKind kind = tag == 3 ? WzNodeKind.Directory : WzNodeKind.Image;
                 return (name, kind);
@@ -459,9 +417,7 @@ public class WzArchive : IDisposable {
         return output;
     }
 
-    private static List<WzNode> ReadDirectoryShallow(WzReader r, byte[] data) {
-        return ReadEntries(r, data);
-    }
+    private static List<WzNode> ReadDirectoryShallow(WzReader r, byte[] data) => ReadEntries(r, data);
 
     private static List<WzNode> ReadDirectory(WzReader r, byte[] data) {
         List<WzNode> nodes = ReadEntries(r, data);
