@@ -138,4 +138,46 @@ public class WzArchiveTests {
         string path = WzArchive.TreeArchivePath("/data/mscw", "String");
         Assert.Equal(Path.Combine("/data/mscw", "String", "String_000.wz"), path);
     }
+
+    [Fact]
+    public void DirectoryOnlyIndexArchive_DetectsClientVersion779() {
+        const uint fstart = 0x3C;
+        uint vh = WzCrypto.VersionHash(WzCrypto.ClientVersion);
+        string[] dirs = ["Cash", "Consume", "Etc", "Install", "Pet", "Special"];
+
+        var writer = new WzWriter();
+        writer.WriteBytes(WzCrypto.Magic);
+        writer.U64(0);
+        writer.U32(fstart);
+        writer.WriteBytes(Encoding.UTF8.GetBytes(WzCrypto.Copyright));
+        writer.U8(0);
+        writer.U16(WzCrypto.EncVersion(WzCrypto.ClientVersion));
+        writer.CompressedI32(dirs.Length);
+
+        var offsetFields = new int[dirs.Length];
+        for (int i = 0; i < dirs.Length; i++) {
+            writer.U8(3);
+            writer.String(dirs[i]);
+            writer.CompressedI32(0);
+            writer.CompressedI32(0);
+            offsetFields[i] = writer.Length;
+            writer.U32(0);
+        }
+
+        // In MSCW index .wz archives (such as Item.wz / Base.wz), the file ends immediately after the root table.
+        uint eofOffset = (uint) writer.Length;
+        Span<byte> span = writer.AsMutableSpan();
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(
+            span.Slice(4, 8),
+            (ulong) (writer.Length - (int) fstart));
+        for (int i = 0; i < dirs.Length; i++) {
+            uint enc = WzCrypto.EncryptOffset((uint) offsetFields[i], fstart, vh, eofOffset);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(span.Slice(offsetFields[i], 4), enc);
+        }
+
+        using WzArchive ar = WzArchive.FromBytes(writer.ToArray(), "Item");
+        Assert.Equal(WzCrypto.ClientVersion, ar.Version);
+        Assert.Equal(6, ar.Nodes.Count);
+        Assert.All(ar.Nodes, n => Assert.True(n.IsDir));
+    }
 }

@@ -371,6 +371,10 @@ public class WzArchive : IDisposable {
             }
         }
 
+        if (WzCrypto.EncVersion(WzCrypto.ClientVersion) == header.EncVer) {
+            return WzCrypto.ClientVersion;
+        }
+
         if (firstMatch.HasValue) {
             return firstMatch.Value;
         }
@@ -400,8 +404,13 @@ public class WzArchive : IDisposable {
                 return true;
             }
 
+            bool allZeroSizeDirs = true;
+            uint minOffset = uint.MaxValue;
+            uint maxOffset = 0;
+
             for (int i = 0; i < count; i++) {
                 byte tag = r.ReadByte();
+                byte effectiveTag = tag;
                 switch (tag) {
                     case 1:
                         r.Take(10);
@@ -412,6 +421,7 @@ public class WzArchive : IDisposable {
                         if (atLong < 1 || atLong >= data.Length) {
                             return false;
                         }
+                        effectiveTag = data[(int) atLong - 1];
                         var nr = new WzReader(data, fstart, versionHash);
                         nr.Seek((int) atLong);
                         nr.SkipString();
@@ -424,15 +434,31 @@ public class WzArchive : IDisposable {
                         return false;
                 }
 
-                r.ReadCompressedInt32(); // size
+                int size = r.ReadCompressedInt32(); // size
                 r.ReadCompressedInt32(); // checksum
                 uint offset = r.DecryptOffset();
-                if (offset >= (uint) data.Length) {
+
+                if (effectiveTag != 3 || size != 0) {
+                    allZeroSizeDirs = false;
+                }
+                if (effectiveTag != 3 && (size < 0 || offset >= (uint) data.Length || (long) offset + size > data.Length)) {
                     return false;
+                }
+                if (offset < minOffset) {
+                    minOffset = offset;
+                }
+                if (offset > maxOffset) {
+                    maxOffset = offset;
                 }
             }
 
-            return true;
+            int tableEnd = r.Position;
+            if (allZeroSizeDirs && tableEnd == data.Length) {
+                isEmpty = true;
+                return true;
+            }
+
+            return minOffset >= (uint) tableEnd && maxOffset < (uint) data.Length;
         } catch (WzException) {
             return false;
         }
@@ -494,8 +520,9 @@ public class WzArchive : IDisposable {
 
     private static List<WzNode> ReadDirectory(ref WzReader r, ReadOnlySpan<byte> data) {
         List<WzNode> nodes = ReadEntries(ref r, data);
+        int tableEnd = r.Position;
         foreach (WzNode n in nodes) {
-            if (n.Kind == WzNodeKind.Directory && n.Offset < (uint) data.Length) {
+            if (n.Kind == WzNodeKind.Directory && n.Offset >= (uint) tableEnd && n.Offset < (uint) data.Length) {
                 var sub = new WzReader(data, r.FStart, r.VersionHash);
                 sub.Seek((int) n.Offset);
                 try {
