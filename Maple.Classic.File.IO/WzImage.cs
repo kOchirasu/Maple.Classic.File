@@ -4,33 +4,21 @@ using System.Text;
 namespace Maple.Classic.File.IO;
 
 /// <summary>
-/// Image (<c>.img</c>) property deserialization and JSON rendering.
+/// Internal image (<c>.img</c>) property deserialization, serialization, and JSON rendering logic.
 /// </summary>
-public static class WzImage {
-    /// <summary>
-    /// Name tags representing inline strings inside an image.
-    /// </summary>
+internal static class WzImage {
     public static ReadOnlySpan<byte> NameInline => [0x00, 0x04, 0x73];
-
-    /// <summary>
-    /// Name tags representing offset-referenced strings inside an image.
-    /// </summary>
     public static ReadOnlySpan<byte> NameDeref => [0x01, 0x1B];
 
-    /// <summary>
-    /// Parses a whole image. <paramref name="data"/> must be the image's bytes; offsets inside are relative to its start (0).
-    /// </summary>
     public static WzValue Parse(byte[] data) {
         ArgumentNullException.ThrowIfNull(data);
         var r = new WzReader(data, 0, 0);
 
-        // Images begin with a name-encoded type string, normally "Property".
         byte tag = r.ReadByte();
         if (tag is 0x73 or 0x1B or 0x01 or 0x00) {
             r.Seek(0);
             string ty = r.ReadStringAt(0, NameInline, NameDeref);
             if (ty != "Property") {
-                // Some images are a bare extended object; re-read as one.
                 r.Seek(0);
                 return ReadExtended(r, 0, data.Length);
             }
@@ -39,7 +27,6 @@ public static class WzImage {
             return ReadExtended(r, 0, data.Length);
         }
 
-        // u16 reserved, then the property list.
         r.ReadUInt16();
         return new WzValue.Object(ReadPropertyList(r, 0));
     }
@@ -79,7 +66,7 @@ public static class WzImage {
         int len = (int) r.ReadUInt32();
         int end = r.Position + len;
         WzValue v = ReadExtended(r, baseOffset, end);
-        r.Seek(end); // Extended blocks are length-delimited; trust the length.
+        r.Seek(end);
         return v;
     }
 
@@ -93,7 +80,7 @@ public static class WzImage {
             }
 
             case "Canvas": {
-                r.ReadByte(); // unused
+                r.ReadByte();
                 bool hasChildren = r.ReadByte() == 1;
                 List<WzProperty> children;
                 if (hasChildren) {
@@ -105,13 +92,20 @@ public static class WzImage {
                 int width = r.ReadCompressedInt32();
                 int height = r.ReadCompressedInt32();
                 int format = r.ReadCompressedInt32() + r.ReadByte();
-                r.ReadUInt32(); // unused
-                // The declared length counts a leading byte that is not part of the payload,
-                // so the pixels start one byte after this field and run `dataLen` bytes.
+                r.ReadUInt32();
                 int rawLen = r.ReadInt32();
                 int dataLen = rawLen > 0 ? rawLen - 1 : 0;
                 int dataOff = r.Position + 1;
-                return new WzValue.Canvas(width, height, format, dataOff, dataLen, children);
+
+                byte[] payload = [];
+                if (dataLen > 0 && (long) dataOff + dataLen <= r.Data.Length) {
+                    payload = r.Data.AsSpan(dataOff, dataLen).ToArray();
+                }
+
+                return new WzValue.Canvas(width, height, format, payload, children) {
+                    DataOffset = dataOff,
+                    DataLength = dataLen,
+                };
             }
 
             case "Shape2D#Vector2D": {
@@ -152,9 +146,127 @@ public static class WzImage {
         }
     }
 
-    /// <summary>
-    /// Renders a <see cref="WzValue"/> as JSON. Canvas pixel data and sound payloads are summarized, not embedded.
-    /// </summary>
+    public static byte[] Serialize(WzValue root) {
+        ArgumentNullException.ThrowIfNull(root);
+        var w = new WzWriter();
+        if (root is WzValue.Object(var props)) {
+            w.TypeString("Property");
+            w.U16(0);
+            WriteList(w, props);
+        } else {
+            WriteExtendedBody(w, root);
+        }
+        return w.ToArray();
+    }
+
+    private static void WriteList(WzWriter w, IReadOnlyList<WzProperty> props) {
+        w.CompressedI32(props.Count);
+        foreach (WzProperty prop in props) {
+            w.ImageString(prop.Name);
+            WriteValue(w, prop.Value);
+        }
+    }
+
+    private static void WriteValue(WzWriter w, WzValue v) {
+        switch (v) {
+            case WzValue.Null:
+                w.U8(0x00);
+                break;
+            case WzValue.Short(var x):
+                w.U8(0x02);
+                w.I16(x);
+                break;
+            case WzValue.Int(var x):
+                w.U8(0x03);
+                w.CompressedI32(x);
+                break;
+            case WzValue.Long(var x):
+                w.U8(0x14);
+                w.CompressedI64(x);
+                break;
+            case WzValue.Float(var x):
+                w.U8(0x04);
+                w.CompressedF32(x);
+                break;
+            case WzValue.Double(var x):
+                w.U8(0x05);
+                w.F64(x);
+                break;
+            case WzValue.String(var s):
+                w.U8(0x08);
+                w.ImageString(s);
+                break;
+            default: {
+                var body = new WzWriter();
+                WriteExtendedBody(body, v);
+                w.U8(0x09);
+                w.U32((uint) body.Length);
+                w.WriteBytes(body.AsSpan());
+                break;
+            }
+        }
+    }
+
+    private static void WriteExtendedBody(WzWriter w, WzValue v) {
+        switch (v) {
+            case WzValue.Object(var props):
+                w.TypeString("Property");
+                w.U16(0);
+                WriteList(w, props);
+                break;
+
+            case WzValue.Canvas c:
+                w.TypeString("Canvas");
+                w.U8(0);
+                if (c.Properties.Count == 0) {
+                    w.U8(0);
+                } else {
+                    w.U8(1);
+                    w.U16(0);
+                    WriteList(w, c.Properties);
+                }
+                w.CompressedI32(c.Width);
+                w.CompressedI32(c.Height);
+                w.CompressedI32(c.Format);
+                w.U8(0);
+                w.U32(0);
+                w.I32(c.Payload.Length + 1);
+                w.U8(0);
+                w.WriteBytes(c.Payload);
+                break;
+
+            case WzValue.Vector(var x, var y):
+                w.TypeString("Shape2D#Vector2D");
+                w.CompressedI32(x);
+                w.CompressedI32(y);
+                break;
+
+            case WzValue.Convex(var items):
+                w.TypeString("Shape2D#Convex2D");
+                w.CompressedI32(items.Count);
+                foreach (WzValue item in items) {
+                    WriteExtendedBody(w, item);
+                }
+                break;
+
+            case WzValue.Uol(var s):
+                w.TypeString("UOL");
+                w.U8(0);
+                w.ImageString(s);
+                break;
+
+            case WzValue.Sound:
+                throw WzException.BadExtendedType("Sound_DX8", 0);
+
+            case WzValue.RawData:
+                throw WzException.BadExtendedType("RawData", 0);
+
+            default:
+                WriteValue(w, v);
+                break;
+        }
+    }
+
     public static string ToJson(WzValue v, int indent = 0) {
         ArgumentNullException.ThrowIfNull(v);
         string pad = new(' ', indent * 2);
@@ -187,16 +299,17 @@ public static class WzImage {
                 IEnumerable<string> inner = items.Select(i => ToJson(i, indent + 1));
                 return $"[{string.Join(", ", inner)}]";
             }
-            case WzValue.Canvas(var width, var height, var format, _, var dataLen, var children): {
-                var parts = new List<string>(5 + children.Count) {
+            case WzValue.Canvas c: {
+                int byteLen = c.Payload.Length > 0 ? c.Payload.Length : c.DataLength;
+                var parts = new List<string>(5 + c.Properties.Count) {
                     $"{pad2}\"_canvas\": true",
-                    $"{pad2}\"width\": {width}",
-                    $"{pad2}\"height\": {height}",
-                    $"{pad2}\"format\": {format}",
-                    $"{pad2}\"bytes\": {dataLen}",
+                    $"{pad2}\"width\": {c.Width}",
+                    $"{pad2}\"height\": {c.Height}",
+                    $"{pad2}\"format\": {c.Format}",
+                    $"{pad2}\"bytes\": {byteLen}",
                 };
-                foreach (WzProperty c in children) {
-                    parts.Add($"{pad2}{JsonString(c.Name)}: {ToJson(c.Value, indent + 1)}");
+                foreach (WzProperty child in c.Properties) {
+                    parts.Add($"{pad2}{JsonString(child.Name)}: {ToJson(child.Value, indent + 1)}");
                 }
                 return $"{{\n{string.Join(",\n", parts)}\n{pad}}}";
             }

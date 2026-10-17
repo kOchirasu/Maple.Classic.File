@@ -60,54 +60,56 @@ public class WzWriterTests {
 
     [Fact]
     public void UolLeaf_RoundTripsAsLink() {
-        var img = new WzOwnedValue.Object();
-        img.SetPath("30/stand1/0/arm", new WzOwnedValue.Int(1));
-        img.SetPath("32", new WzOwnedValue.Uol("30"));
+        var img = new WzValue.Object {
+            ["30/stand1/0/arm"] = 1,
+            ["32"] = new WzValue.Uol("30"),
+        };
 
-        byte[] bytes = img.SerializeImage();
-        WzOwnedValue back = WzOwnedValue.Parse(bytes);
+        byte[] bytes = img.ToBytes();
+        WzValue back = WzValue.Parse(bytes);
 
-        var uol = Assert.IsType<WzOwnedValue.Uol>(back.Get("32"));
+        var uol = Assert.IsType<WzValue.Uol>(back["32"]);
         Assert.Equal("30", uol.Value);
-        Assert.IsType<WzOwnedValue.Object>(back.Get("30")?.Get("stand1"));
-
-        WzValue node = WzImage.Parse(bytes);
-        Assert.Equal("30", node.Get("32")?.AsString());
+        Assert.IsType<WzValue.Object>(back["30/stand1"]);
+        Assert.Equal("30", back["32"]?.AsString());
     }
 
     [Fact]
     public void OutlinkedStubs_AreInlinedAndDanglingLinkFails() {
-        static WzOwnedValue.Canvas Stub(string link) => new(
+        static WzValue.Canvas Stub(string link) => new(
             width: 1,
             height: 1,
             format: 1,
             payload: new byte[10],
-            entries: [
-                ("origin", new WzOwnedValue.Vector(35, 11)),
-                ("_outlink", new WzOwnedValue.String(link)),
+            properties: [
+                new WzProperty("origin", (-35, 11)),
+                new WzProperty("_outlink", link),
             ]);
 
-        var img = new WzOwnedValue.Object();
-        img.SetPath("5002828/stand0/0", Stub("Character/PetEquip/_Canvas/01802653.img/5002828/stand0/0"));
-        img.SetPath("5002828/stand0/1", Stub("Character/PetEquip/_Canvas/01802653.img/5002828/stand0/0"));
-        img.SetPath("info/tuc", new WzOwnedValue.Int(8));
+        var img = new WzValue.Object {
+            ["5002828/stand0/0"] = Stub("Character/PetEquip/_Canvas/01802653.img/5002828/stand0/0"),
+            ["5002828/stand0/1"] = Stub("Character/PetEquip/_Canvas/01802653.img/5002828/stand0/0"),
+            ["info/tuc"] = 8,
+        };
 
-        var asked = new List<string>();
+        // Also verify inlining directly against a WzArchive!
         byte[] targetPayload = Enumerable.Repeat((byte) 7, 226).ToArray();
-        int n = img.InlineOutlinks(link => {
-            asked.Add(link);
-            return new WzOwnedValue.Canvas(31, 24, 1, targetPayload);
-        });
+        var canvasImg = new WzValue.Object {
+            ["5002828/stand0/0"] = new WzValue.Canvas(31, 24, 1, targetPayload),
+        };
+        using var canvasArchive = new WzArchive();
+        canvasArchive.SetImage("01802653.img", canvasImg);
+        using WzArchive builtCanvasArchive = WzArchive.FromBytes(canvasArchive.ToBytes());
 
+        int n = img.InlineOutlinks(builtCanvasArchive);
         Assert.Equal(2, n);
-        Assert.Equal(2, asked.Count);
 
-        var canvas = Assert.IsType<WzOwnedValue.Canvas>(img.GetPath("5002828/stand0/1"));
+        var canvas = Assert.IsType<WzValue.Canvas>(img["5002828/stand0/1"]);
         Assert.Equal((31, 24, 226), (canvas.Width, canvas.Height, canvas.Payload.Length));
-        Assert.Contains(canvas.Entries, e => e.Name == "origin");
-        Assert.DoesNotContain(canvas.Entries, e => e.Name == "_outlink");
+        Assert.NotNull(canvas["origin"]);
+        Assert.Null(canvas["_outlink"]);
 
-        WzOwnedValue back = WzOwnedValue.Parse(img.SerializeImage());
+        WzValue back = WzValue.Parse(img.ToBytes());
         var canvases = back.Canvases();
         Assert.Equal(2, canvases.Count);
         Assert.All(canvases, c => {
@@ -115,130 +117,115 @@ public class WzWriterTests {
             Assert.Equal(226, c.PayloadLength);
         });
 
-        var dangling = new WzOwnedValue.Object();
-        dangling.SetPath("x/0", Stub("Character/PetEquip/_Canvas/nowhere.img/x/0"));
+        var dangling = new WzValue.Object {
+            ["x/0"] = Stub("Character/PetEquip/_Canvas/nowhere.img/x/0"),
+        };
         Assert.Throws<WzException>(() => dangling.InlineOutlinks(_ => null));
     }
 
     [Fact]
     public void CanvasPixels_AreReplacedInPlaceAndNothingElseBecomesACanvas() {
-        var img = new WzOwnedValue.Object();
-        img.SetPath(
-            "info/icon",
-            new WzOwnedValue.Canvas(
+        var img = new WzValue.Object {
+            ["info/icon"] = new WzValue.Canvas(
                 1,
                 1,
                 1,
                 new byte[10],
-                [("origin", new WzOwnedValue.Vector(-1, 30))]));
-        img.SetPath("info/cash", new WzOwnedValue.Int(1));
+                [new WzProperty("origin", (-1, 30))]),
+            ["info/cash"] = 1,
+        };
 
         byte[] newPayload = Enumerable.Repeat((byte) 9, 44).ToArray();
         Assert.True(img.ReplaceCanvasPixels("info/icon", 33, 33, 2, newPayload));
 
-        var icon = Assert.IsType<WzOwnedValue.Canvas>(img.GetPath("info/icon"));
+        var icon = Assert.IsType<WzValue.Canvas>(img["info/icon"]);
         Assert.Equal((33, 2, 44), (icon.Width, icon.Format, icon.Payload.Length));
-        Assert.Single(icon.Entries);
-        Assert.Equal(("origin", new WzOwnedValue.Vector(-1, 30)), icon.Entries[0]);
+        Assert.Equal((-1, 30), icon["origin"]?.AsVector());
 
         Assert.False(img.ReplaceCanvasPixels("info/cash", 1, 1, 1, []));
-        Assert.Equal(new WzOwnedValue.Int(1), img.GetPath("info/cash"));
+        Assert.Equal(1, img["info/cash"]?.AsInt());
         Assert.False(img.ReplaceCanvasPixels("info/nothing", 1, 1, 1, []));
 
-        WzOwnedValue back = WzOwnedValue.Parse(img.SerializeImage());
+        WzValue back = WzValue.Parse(img.ToBytes());
         Assert.Equal([("/info/icon", 33, 33, 2, 44)], back.Canvases());
     }
 
     [Fact]
-    public void RemovePath_TakesOneLeafAndReportsWhetherItWasThere() {
-        var img = new WzOwnedValue.Object();
-        img.SetPath("info/chatBalloon", new WzOwnedValue.Int(911));
-        img.SetPath("info/nameTag", new WzOwnedValue.Int(913));
-        img.SetPath("info/cash", new WzOwnedValue.Int(1));
+    public void Remove_TakesOneLeafAndReportsWhetherItWasThere() {
+        var img = new WzValue.Object {
+            ["info/chatBalloon"] = 911,
+            ["info/nameTag"] = 913,
+            ["info/cash"] = 1,
+        };
 
-        Assert.True(img.RemovePath("info/chatBalloon"));
-        Assert.False(img.RemovePath("info/chatBalloon"));
-        Assert.False(img.RemovePath("nothing/here"));
-        Assert.Null(img.GetPath("info/chatBalloon"));
-        Assert.Equal(new WzOwnedValue.Int(913), img.GetPath("info/nameTag"));
-        Assert.Equal(new WzOwnedValue.Int(1), img.GetPath("info/cash"));
-        Assert.Equal(2, img.GetPath("info")?.Children?.Count);
+        Assert.True(img.Remove("info/chatBalloon"));
+        Assert.False(img.Remove("info/chatBalloon"));
+        Assert.False(img.Remove("nothing/here"));
+        Assert.Null(img["info/chatBalloon"]);
+        Assert.Equal(913, img["info/nameTag"]?.AsInt());
+        Assert.Equal(1, img["info/cash"]?.AsInt());
+
+        // Setting null via indexer also removes a property
+        img["info/nameTag"] = null;
+        Assert.Null(img["info/nameTag"]);
+        Assert.Single(img["info"]!.Children!);
     }
 
     [Fact]
-    public void SetPath_AddsNestedStringLeaf() {
-        var root = new WzOwnedValue.Object([
-            ("ClassicWorld", new WzOwnedValue.Object([
-                ("Coat", new WzOwnedValue.Object()),
-            ])),
-        ]);
-        root.SetPath("ClassicWorld/Longcoat/1054555/name", new WzOwnedValue.String("Frieren's Clothes"));
-        root.SetPath("ClassicWorld/Coat/1040021/name", new WzOwnedValue.String("Blue Sergeant"));
+    public void IndexerSetter_AddsNestedStringLeaf() {
+        var root = new WzValue.Object {
+            ["ClassicWorld/Coat"] = new WzValue.Object(),
+            ["ClassicWorld/Longcoat/1054555/name"] = "Frieren's Clothes",
+            ["ClassicWorld/Coat/1040021/name"] = "Blue Sergeant",
+        };
 
-        byte[] bytes = root.SerializeImage();
-        WzOwnedValue back = WzOwnedValue.Parse(bytes);
+        byte[] bytes = root.ToBytes();
+        WzValue back = WzValue.Parse(bytes);
 
-        WzOwnedValue? name = back.Get("ClassicWorld")?.Get("Longcoat")?.Get("1054555")?.Get("name");
-        Assert.Equal(new WzOwnedValue.String("Frieren's Clothes"), name);
-        Assert.NotNull(back.Get("ClassicWorld")?.Get("Coat")?.Get("1040021"));
+        Assert.Equal("Frieren's Clothes", back["ClassicWorld/Longcoat/1054555/name"]?.AsString());
+        Assert.NotNull(back["ClassicWorld/Coat/1040021"]);
     }
 
     [Fact]
-    public void WrittenArchive_OpensDetectsVersion779AndMatchesByteForByte() {
-        var img1 = new WzOwnedValue.Object();
-        img1.SetPath("info/islot", new WzOwnedValue.String("Ma"));
-        img1.SetPath("info/reqLevel", new WzOwnedValue.Int(10));
-        img1.SetPath(
-            "info/icon",
-            new WzOwnedValue.Canvas(
+    public void ArchiveSaveAndRoundTrip_OpensDetectsVersion779AndMatchesByteForByte() {
+        var img1 = new WzValue.Object {
+            ["info/islot"] = "Ma",
+            ["info/reqLevel"] = 10,
+            ["info/icon"] = new WzValue.Canvas(
                 28,
                 28,
                 1,
                 Enumerable.Range(0, 120).Select(i => (byte) i).ToArray(),
-                [("origin", new WzOwnedValue.Vector(-2, 28))]));
+                [new WzProperty("origin", (-2, 28))]),
+        };
 
-        var img2 = new WzOwnedValue.Object();
-        img2.SetPath("01040000/name", new WzOwnedValue.String("White Undershirt"));
-        img2.SetPath("01040000/desc", new WzOwnedValue.String("Basic coat"));
-
-        List<WzImageEntry> images = [
-            new WzImageEntry("01040000.img", img1.SerializeImage()),
-            new WzImageEntry("String.img", img2.SerializeImage()),
-        ];
-
-        byte[] archiveBytes = WzWriter.WriteArchive(779, images);
-        WzWriter.VerifyArchive(archiveBytes, 779, images);
+        var img2 = new WzValue.Object {
+            ["01040000/name"] = "White Undershirt",
+            ["01040000/desc"] = "Basic coat",
+        };
 
         string tempDir = Path.Combine(Path.GetTempPath(), $"wz-writer-test-{Guid.NewGuid():N}");
         Directory.CreateDirectory(tempDir);
         try {
             string path = Path.Combine(tempDir, "Coat_000.wz");
-            System.IO.File.WriteAllBytes(path, archiveBytes);
 
-            using WzArchive again = WzArchive.Open(path);
-            Assert.Equal((ushort) 779, again.Version);
-            Assert.Equal(0x3Cu, again.Header.FStart);
-            Assert.Equal((ulong) (archiveBytes.Length - 0x3C), again.Header.FSize);
-            Assert.Equal(images.Count, again.Root.Children.Count);
-
-            for (int i = 0; i < images.Count; i++) {
-                WzNode node = again.Root.Children[i];
-                WzImageEntry expected = images[i];
-                Assert.Equal(expected.Name, node.Name);
-                Assert.Equal(WzCrypto.Checksum(expected.Bytes), node.Checksum);
-                Assert.Equal(expected.Bytes, again.ImageBytes(node));
+            using (var archive = new WzArchive()) {
+                archive.SetImage("01040000.img", img1);
+                archive.SetImage("String.img", img2);
+                archive.Save(path);
             }
 
-            // Round-trip through Owned -> Serialize -> Parse and compare JSON
-            foreach (WzNode node in again.Root.Children) {
-                byte[] origBytes = again.ImageBytes(node);
-                WzOwnedValue owned = WzOwnedValue.Parse(origBytes);
-                byte[] reserialized = owned.SerializeImage();
-                WzOwnedValue reparsed = WzOwnedValue.Parse(reserialized);
-                Assert.Equal(owned, reparsed);
-                Assert.Equal(
-                    WzImage.ToJson(WzImage.Parse(origBytes)),
-                    WzImage.ToJson(WzImage.Parse(reserialized)));
+            using var reopened = new WzArchive(path);
+            Assert.Equal((ushort) 779, reopened.Version);
+            Assert.Equal(0x3Cu, reopened.Header.FStart);
+            Assert.Equal(2, reopened.Nodes.Count);
+
+            foreach (WzNode node in reopened.Nodes) {
+                WzValue parsed = node.ParseImage();
+                byte[] reserialized = parsed.ToBytes();
+                WzValue reparsed = WzValue.Parse(reserialized);
+                Assert.Equal(parsed, reparsed);
+                Assert.Equal(parsed.ToJson(), reparsed.ToJson());
             }
         } finally {
             Directory.Delete(tempDir, recursive: true);

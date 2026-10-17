@@ -5,15 +5,12 @@ using Maple.Classic.File.IO.Crypto;
 
 namespace Maple.Classic.File.IO;
 
-/// <summary>
-/// One image entry going into or extracted from a WZ archive.
-/// </summary>
-public sealed record WzImageEntry(string Name, byte[] Bytes);
+internal sealed record WzImageEntry(string Name, byte[] Bytes);
 
 /// <summary>
-/// Byte-level WZ encoders and archive builder — the exact inverse of <see cref="WzReader"/>, <see cref="WzArchive"/>, and <see cref="WzImage"/>.
+/// Internal byte-level WZ encoders and archive builder.
 /// </summary>
-public class WzWriter {
+internal class WzWriter {
     private readonly List<byte> buf;
 
     public int Length => buf.Count;
@@ -84,9 +81,6 @@ public class WzWriter {
 
     public void F64(double v) => WriteDouble(v);
 
-    /// <summary>
-    /// Compressed int: one signed byte unless it needs the <c>-128</c> (<c>0x80</c>) escape to a full <see cref="int"/>.
-    /// </summary>
     public void WriteCompressedInt32(int v) {
         if (v > sbyte.MinValue && v <= sbyte.MaxValue) {
             WriteByte(unchecked((byte) (sbyte) v));
@@ -98,9 +92,6 @@ public class WzWriter {
 
     public void CompressedI32(int v) => WriteCompressedInt32(v);
 
-    /// <summary>
-    /// Compressed long: one signed byte unless it needs the <c>-128</c> (<c>0x80</c>) escape to a full <see cref="long"/>.
-    /// </summary>
     public void WriteCompressedInt64(long v) {
         if (v > sbyte.MinValue && v <= sbyte.MaxValue) {
             WriteByte(unchecked((byte) (sbyte) v));
@@ -112,9 +103,6 @@ public class WzWriter {
 
     public void CompressedI64(long v) => WriteCompressedInt64(v);
 
-    /// <summary>
-    /// Compressed float: <c>0.0f</c> is one <c>0x00</c> byte; anything else is <c>0x80</c> + <see cref="float"/>.
-    /// </summary>
     public void WriteCompressedSingle(float v) {
         if (v == 0.0f) {
             WriteByte(0);
@@ -126,10 +114,6 @@ public class WzWriter {
 
     public void CompressedF32(float v) => WriteCompressedSingle(v);
 
-    /// <summary>
-    /// Writes an obfuscated WZ string with zero key.
-    /// Uses ASCII encoding only when every character is below <c>0x80</c>; non-ASCII strings use UTF-16LE.
-    /// </summary>
     public void WriteString(string s) {
         if (string.IsNullOrEmpty(s)) {
             WriteByte(0);
@@ -175,9 +159,6 @@ public class WzWriter {
 
     public void String(string s) => WriteString(s);
 
-    /// <summary>
-    /// Writes a name or string value inside an image inline with the <c>0x00</c> tag.
-    /// </summary>
     public void WriteImageString(string s) {
         WriteByte(0x00);
         WriteString(s);
@@ -185,9 +166,6 @@ public class WzWriter {
 
     public void ImageString(string s) => WriteImageString(s);
 
-    /// <summary>
-    /// Writes an extended-type name inline with the <c>0x73</c> tag.
-    /// </summary>
     public void WriteTypeString(string s) {
         WriteByte(0x73);
         WriteString(s);
@@ -195,9 +173,6 @@ public class WzWriter {
 
     public void TypeString(string s) => WriteTypeString(s);
 
-    /// <summary>
-    /// Builds a complete standalone WZ archive: PKG1 header, flat directory of images, and the image payloads.
-    /// </summary>
     public static byte[] WriteArchive(ushort version, IReadOnlyList<WzImageEntry> images) {
         ArgumentNullException.ThrowIfNull(images);
 
@@ -218,11 +193,6 @@ public class WzWriter {
             dir.CompressedI32(WzCrypto.Checksum(img.Bytes));
             offsetFields[i] = dir.Length;
             dir.U32(0);
-        }
-
-        int totalPayloadSize = 0;
-        for (int i = 0; i < images.Count; i++) {
-            totalPayloadSize += images[i].Bytes.Length;
         }
 
         int pos = (int) fstart + dir.Length;
@@ -256,9 +226,6 @@ public class WzWriter {
         return output;
     }
 
-    /// <summary>
-    /// Extracts every image of a flat archive as owned bytes, in directory order.
-    /// </summary>
     public static List<WzImageEntry> ArchiveImages(WzArchive archive) {
         ArgumentNullException.ThrowIfNull(archive);
         var output = new List<WzImageEntry>(archive.Root.Children.Count);
@@ -271,22 +238,26 @@ public class WzWriter {
         return output;
     }
 
-    /// <summary>
-    /// Replaces or appends images by name, keeping the base order. Appended images are sorted by ordinal name.
-    /// </summary>
     public static List<WzImageEntry> MergeImages(
         IEnumerable<WzImageEntry> baseImages,
-        IEnumerable<WzImageEntry> additions) {
+        IEnumerable<WzImageEntry> additions,
+        IReadOnlySet<string>? removals = null) {
         ArgumentNullException.ThrowIfNull(baseImages);
         ArgumentNullException.ThrowIfNull(additions);
 
         var byName = new SortedDictionary<string, WzImageEntry>(StringComparer.Ordinal);
         foreach (WzImageEntry a in additions) {
-            byName[a.Name] = a;
+            if (removals is null || !removals.Contains(a.Name)) {
+                byName[a.Name] = a;
+            }
         }
 
         var output = new List<WzImageEntry>();
         foreach (WzImageEntry b in baseImages) {
+            if (removals is not null && removals.Contains(b.Name)) {
+                byName.Remove(b.Name);
+                continue;
+            }
             if (byName.Remove(b.Name, out WzImageEntry? replacement)) {
                 output.Add(replacement);
             } else {
@@ -298,9 +269,6 @@ public class WzWriter {
         return output;
     }
 
-    /// <summary>
-    /// Sanity-checks that a written archive parses and holds the exact images it was given.
-    /// </summary>
     public static void VerifyArchive(byte[] bytes, ushort version, IReadOnlyList<WzImageEntry> images) {
         ArgumentNullException.ThrowIfNull(bytes);
         ArgumentNullException.ThrowIfNull(images);

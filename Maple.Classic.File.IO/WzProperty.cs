@@ -1,3 +1,5 @@
+using System.Collections;
+
 namespace Maple.Classic.File.IO;
 
 /// <summary>
@@ -6,9 +8,9 @@ namespace Maple.Classic.File.IO;
 public sealed record WzProperty(string Name, WzValue Value);
 
 /// <summary>
-/// Represents a deserialized WZ image property value.
+/// Represents a WZ image property value. Supports direct path navigation, implicit primitive conversions, in-place mutation, and binary/JSON serialization.
 /// </summary>
-public abstract record WzValue {
+public abstract record WzValue : IEnumerable<WzProperty> {
     private WzValue() { }
 
     public sealed record Null() : WzValue {
@@ -40,7 +42,9 @@ public abstract record WzValue {
     /// <summary>
     /// A nested property list (<c>Property</c>).
     /// </summary>
-    public sealed record Object(IReadOnlyList<WzProperty> Properties) : WzValue {
+    public sealed record Object(List<WzProperty> Properties) : WzValue {
+        public Object() : this(new List<WzProperty>()) { }
+
         public bool Equals(Object? other) {
             if (ReferenceEquals(this, other)) return true;
             if (other is null) return false;
@@ -57,24 +61,40 @@ public abstract record WzValue {
     }
 
     /// <summary>
-    /// <c>Canvas</c> — image metadata and payload slice location (<see cref="DataOffset"/>, <see cref="DataLength"/>) within the image bytes.
+    /// <c>Canvas</c> — image dimensions, format, compressed pixel payload, and child properties (<c>origin</c>, <c>z</c>, <c>_outlink</c>, etc.).
     /// </summary>
-    public sealed record Canvas(
-        int Width,
-        int Height,
-        int Format,
-        int DataOffset,
-        int DataLength,
-        IReadOnlyList<WzProperty> ChildrenProperties) : WzValue {
+    public sealed record Canvas : WzValue {
+        public int Width { get; set; }
+        public int Height { get; set; }
+        public int Format { get; set; }
+        public byte[] Payload { get; set; }
+        public List<WzProperty> Properties { get; set; }
+
+        internal int DataOffset { get; init; }
+        internal int DataLength { get; init; }
+
+        public Canvas(
+            int width,
+            int height,
+            int format,
+            byte[] payload,
+            List<WzProperty>? properties = null) {
+            Width = width;
+            Height = height;
+            Format = format;
+            Payload = payload ?? [];
+            Properties = properties ?? [];
+            DataLength = Payload.Length;
+        }
+
         public bool Equals(Canvas? other) {
             if (ReferenceEquals(this, other)) return true;
             if (other is null) return false;
             return Width == other.Width
                 && Height == other.Height
                 && Format == other.Format
-                && DataOffset == other.DataOffset
-                && DataLength == other.DataLength
-                && ChildrenProperties.SequenceEqual(other.ChildrenProperties);
+                && Payload.AsSpan().SequenceEqual(other.Payload)
+                && Properties.SequenceEqual(other.Properties);
         }
 
         public override int GetHashCode() {
@@ -82,9 +102,8 @@ public abstract record WzValue {
             hc.Add(Width);
             hc.Add(Height);
             hc.Add(Format);
-            hc.Add(DataOffset);
-            hc.Add(DataLength);
-            foreach (WzProperty p in ChildrenProperties) {
+            hc.AddBytes(Payload);
+            foreach (WzProperty p in Properties) {
                 hc.Add(p);
             }
             return hc.ToHashCode();
@@ -99,7 +118,9 @@ public abstract record WzValue {
     /// <summary>
     /// <c>Shape2D#Convex2D</c>
     /// </summary>
-    public sealed record Convex(IReadOnlyList<WzValue> Items) : WzValue {
+    public sealed record Convex(List<WzValue> Items) : WzValue {
+        public Convex() : this(new List<WzValue>()) { }
+
         public bool Equals(Convex? other) {
             if (ReferenceEquals(this, other)) return true;
             if (other is null) return false;
@@ -120,6 +141,42 @@ public abstract record WzValue {
     /// </summary>
     public sealed record RawData(int DataLength) : WzValue;
 
+    // -------------------------------------------------------------------------
+    // Implicit & Explicit Conversions (Minimal Boilerplate)
+    // -------------------------------------------------------------------------
+
+    public static implicit operator WzValue(short value) => new Short(value);
+    public static implicit operator WzValue(int value) => new Int(value);
+    public static implicit operator WzValue(long value) => new Long(value);
+    public static implicit operator WzValue(float value) => new Float(value);
+    public static implicit operator WzValue(double value) => new Double(value);
+    public static implicit operator WzValue(string value) => new String(value);
+    public static implicit operator WzValue((int X, int Y) value) => new Vector(value.X, value.Y);
+
+    public static explicit operator short(WzValue value) =>
+        value.AsShort() ?? throw new InvalidCastException($"Cannot convert {value.GetType().Name} to Int16.");
+
+    public static explicit operator int(WzValue value) =>
+        value.AsInt() ?? throw new InvalidCastException($"Cannot convert {value.GetType().Name} to Int32.");
+
+    public static explicit operator long(WzValue value) =>
+        value.AsLong() ?? throw new InvalidCastException($"Cannot convert {value.GetType().Name} to Int64.");
+
+    public static explicit operator float(WzValue value) =>
+        value.AsFloat() ?? throw new InvalidCastException($"Cannot convert {value.GetType().Name} to Single.");
+
+    public static explicit operator double(WzValue value) =>
+        value.AsDouble() ?? throw new InvalidCastException($"Cannot convert {value.GetType().Name} to Double.");
+
+    public static explicit operator string?(WzValue? value) => value?.AsString();
+
+    public static explicit operator (int X, int Y)(WzValue value) =>
+        value.AsVector() ?? throw new InvalidCastException($"Cannot convert {value.GetType().Name} to Vector.");
+
+    // -------------------------------------------------------------------------
+    // Typed Value Accessors
+    // -------------------------------------------------------------------------
+
     /// <summary>
     /// Returns the string content if this value is <see cref="String"/> or <see cref="Uol"/>, otherwise <c>null</c>.
     /// </summary>
@@ -129,15 +186,12 @@ public abstract record WzValue {
         _ => null,
     };
 
-    /// <summary>
-    /// Alias for <see cref="AsString"/> matching Rust's <c>as_str</c>.
-    /// </summary>
-    public string? AsStr() => AsString();
+    public string AsString(string defaultValue) => AsString() ?? defaultValue;
 
     /// <summary>
-    /// Converts numeric values (<see cref="Short"/>, <see cref="Int"/>, <see cref="Long"/>, <see cref="Float"/>, <see cref="Double"/>) to <see cref="long"/>.
+    /// Converts numeric values to <see cref="long"/>, or returns <c>null</c>.
     /// </summary>
-    public long? AsInt64() => this switch {
+    public long? AsLong() => this switch {
         Short(var v) => v,
         Int(var v) => v,
         Long(var v) => v,
@@ -146,13 +200,36 @@ public abstract record WzValue {
         _ => null,
     };
 
+    public long AsLong(long defaultValue) => AsLong() ?? defaultValue;
+
+    public long? AsInt64() => AsLong();
+
     /// <summary>
-    /// Alias for <see cref="AsInt64"/> matching Rust's <c>as_i64</c>.
+    /// Converts numeric values to <see cref="int"/>, or returns <c>null</c>.
     /// </summary>
-    public long? AsI64() => AsInt64();
+    public int? AsInt() => AsLong() is { } v ? (int) v : null;
 
-    public int? AsInt32() => AsInt64() is { } v ? (int) v : null;
+    public int AsInt(int defaultValue) => AsInt() ?? defaultValue;
 
+    public int? AsInt32() => AsInt();
+
+    /// <summary>
+    /// Converts numeric values to <see cref="short"/>, or returns <c>null</c>.
+    /// </summary>
+    public short? AsShort() => AsLong() is { } v ? (short) v : null;
+
+    public short AsShort(short defaultValue) => AsShort() ?? defaultValue;
+
+    /// <summary>
+    /// Converts numeric values to <see cref="float"/>, or returns <c>null</c>.
+    /// </summary>
+    public float? AsFloat() => AsDouble() is { } v ? (float) v : null;
+
+    public float AsFloat(float defaultValue) => AsFloat() ?? defaultValue;
+
+    /// <summary>
+    /// Converts numeric values to <see cref="double"/>, or returns <c>null</c>.
+    /// </summary>
     public double? AsDouble() => this switch {
         Short(var v) => v,
         Int(var v) => v,
@@ -162,22 +239,50 @@ public abstract record WzValue {
         _ => null,
     };
 
+    public double AsDouble(double defaultValue) => AsDouble() ?? defaultValue;
+
+    /// <summary>
+    /// Returns <c>(X, Y)</c> if this value is a <see cref="Vector"/>, otherwise <c>null</c>.
+    /// </summary>
+    public (int X, int Y)? AsVector() => this is Vector(var x, var y) ? (x, y) : null;
+
+    // -------------------------------------------------------------------------
+    // Hierarchy Navigation & In-Place Mutation
+    // -------------------------------------------------------------------------
+
     /// <summary>
     /// Child properties if this node is an <see cref="Object"/> or <see cref="Canvas"/>, otherwise <c>null</c>.
     /// </summary>
-    public IReadOnlyList<WzProperty>? Children => this switch {
+    public IReadOnlyList<WzProperty>? Children => MutableChildren;
+
+    internal List<WzProperty>? MutableChildren => this switch {
         Object(var c) => c,
-        Canvas { ChildrenProperties: var c } => c,
+        Canvas { Properties: var c } => c,
         _ => null,
     };
 
     /// <summary>
-    /// Walks to a descendant value by <c>/</c>-separated path.
+    /// Gets or sets a descendant value by <c>/</c>-separated path.
+    /// Assigning <c>null</c> removes the property at <paramref name="path"/>; assigning a <see cref="WzValue"/> creates intermediate <see cref="Object"/> nodes as needed.
+    /// </summary>
+    public WzValue? this[string path] {
+        get => Get(path);
+        set {
+            if (value is null) {
+                Remove(path);
+            } else {
+                Set(path, value);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Walks to a descendant value by <c>/</c>-separated path, or returns <c>null</c>.
     /// </summary>
     public WzValue? Get(string path) {
         WzValue cur = this;
         foreach (string part in path.Split('/', StringSplitOptions.RemoveEmptyEntries)) {
-            IReadOnlyList<WzProperty>? kids = cur.Children;
+            List<WzProperty>? kids = cur.MutableChildren;
             if (kids is null) {
                 return null;
             }
@@ -196,10 +301,212 @@ public abstract record WzValue {
         return cur;
     }
 
-    public WzValue? this[string path] => Get(path);
+    /// <summary>
+    /// Sets a property at a <c>/</c>-separated path, creating intermediate <see cref="Object"/> nodes as needed.
+    /// </summary>
+    public void Set(string path, WzValue value) {
+        ArgumentNullException.ThrowIfNull(value);
+        string[] parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0) {
+            return;
+        }
+
+        string leaf = parts[^1];
+        WzValue cur = this;
+        for (int i = 0; i < parts.Length - 1; i++) {
+            string part = parts[i];
+            if (cur.GetDirect(part) is null) {
+                cur.SetDirect(part, new Object());
+            }
+            cur = cur.GetDirect(part)!;
+        }
+        cur.SetDirect(leaf, value);
+    }
 
     /// <summary>
-    /// Renders this value as JSON. Canvas pixel data and sound payloads are summarized.
+    /// Removes the property at a <c>/</c>-separated path. Returns <c>true</c> if a property was removed.
+    /// </summary>
+    public bool Remove(string path) {
+        string[] parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0) {
+            return false;
+        }
+
+        string leaf = parts[^1];
+        WzValue cur = this;
+        for (int i = 0; i < parts.Length - 1; i++) {
+            WzValue? next = cur.GetDirect(parts[i]);
+            if (next is null) {
+                return false;
+            }
+            cur = next;
+        }
+
+        List<WzProperty>? kids = cur.MutableChildren;
+        if (kids is null) {
+            return false;
+        }
+
+        int before = kids.Count;
+        kids.RemoveAll(p => p.Name == leaf);
+        return kids.Count != before;
+    }
+
+    private WzValue? GetDirect(string name) {
+        List<WzProperty>? kids = MutableChildren;
+        if (kids is null) {
+            return null;
+        }
+        foreach (WzProperty prop in kids) {
+            if (prop.Name == name) {
+                return prop.Value;
+            }
+        }
+        return null;
+    }
+
+    private void SetDirect(string name, WzValue value) {
+        List<WzProperty>? kids = MutableChildren;
+        if (kids is null) {
+            return;
+        }
+        for (int i = 0; i < kids.Count; i++) {
+            if (kids[i].Name == name) {
+                kids[i] = new WzProperty(name, value);
+                return;
+            }
+        }
+        kids.Add(new WzProperty(name, value));
+    }
+
+    /// <summary>
+    /// Replaces the pixels of the <see cref="Canvas"/> at <paramref name="path"/>, keeping its child properties (<c>origin</c>, <c>z</c>, <c>_outlink</c>, etc.).
+    /// Returns <c>false</c> when there is no canvas at <paramref name="path"/>.
+    /// </summary>
+    public bool ReplaceCanvasPixels(string path, int width, int height, int format, byte[] payload) {
+        if (Get(path) is Canvas canvas) {
+            canvas.Width = width;
+            canvas.Height = height;
+            canvas.Format = format;
+            canvas.Payload = payload;
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Pulls every <c>_outlink</c>ed canvas into this tree by resolving links against <paramref name="canvasArchive"/>.
+    /// </summary>
+    public int InlineOutlinks(WzArchive canvasArchive) {
+        ArgumentNullException.ThrowIfNull(canvasArchive);
+        var cache = new Dictionary<string, WzValue>(StringComparer.Ordinal);
+
+        return InlineOutlinks(link => {
+            int idx = link.IndexOf(".img/", StringComparison.Ordinal);
+            if (idx < 0) {
+                return null;
+            }
+            string imgPart = link[..(idx + 4)];
+            string innerPath = link[(idx + 5)..];
+            int lastSlash = imgPart.LastIndexOf('/');
+            string imgName = lastSlash >= 0 ? imgPart[(lastSlash + 1)..] : imgPart;
+
+            if (!cache.TryGetValue(imgName, out WzValue? parsedCanvasImg)) {
+                WzNode? node = canvasArchive[imgName];
+                if (node is null) {
+                    return null;
+                }
+                parsedCanvasImg = canvasArchive.ParseImage(node);
+                cache[imgName] = parsedCanvasImg;
+            }
+
+            return parsedCanvasImg[innerPath];
+        });
+    }
+
+    /// <summary>
+    /// Pulls every <c>_outlink</c>ed canvas into this tree using a custom resolver function, replacing each stub with the resolved pixels and dropping the <c>_outlink</c> leaf.
+    /// </summary>
+    public int InlineOutlinks(Func<string, WzValue?> resolve) {
+        ArgumentNullException.ThrowIfNull(resolve);
+        int filled = 0;
+
+        if (this is Canvas canvasNode) {
+            string? link = canvasNode.GetDirect("_outlink")?.AsString();
+            if (link is not null) {
+                WzValue? target = resolve(link);
+                if (target is null) {
+                    throw WzException.BadEntryType(0xEC, 0);
+                }
+                if (target is not Canvas targetCanvas) {
+                    throw WzException.BadEntryType(0xEC, 1);
+                }
+
+                canvasNode.Width = targetCanvas.Width;
+                canvasNode.Height = targetCanvas.Height;
+                canvasNode.Format = targetCanvas.Format;
+                canvasNode.Payload = targetCanvas.Payload.ToArray();
+                canvasNode.Properties.RemoveAll(p => p.Name == "_outlink");
+                filled++;
+            }
+        }
+
+        List<WzProperty>? kids = MutableChildren;
+        if (kids is not null) {
+            for (int i = 0; i < kids.Count; i++) {
+                filled += kids[i].Value.InlineOutlinks(resolve);
+            }
+        }
+
+        return filled;
+    }
+
+    /// <summary>
+    /// Enumerates every canvas in this subtree as <c>(Path, Width, Height, Format, PayloadLength)</c>.
+    /// </summary>
+    public List<(string Path, int Width, int Height, int Format, int PayloadLength)> Canvases() {
+        var output = new List<(string Path, int Width, int Height, int Format, int PayloadLength)>();
+        Walk(this, "", output);
+        return output;
+
+        static void Walk(
+            WzValue v,
+            string path,
+            List<(string Path, int Width, int Height, int Format, int PayloadLength)> acc) {
+            if (v is Canvas c) {
+                acc.Add((path, c.Width, c.Height, c.Format, c.Payload.Length));
+            }
+            List<WzProperty>? kids = v.MutableChildren;
+            if (kids is not null) {
+                foreach (WzProperty prop in kids) {
+                    Walk(prop.Value, $"{path}/{prop.Name}", acc);
+                }
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Parsing & Serialization
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Parses a WZ <c>.img</c> byte array into a <see cref="WzValue"/> property tree.
+    /// </summary>
+    public static WzValue Parse(byte[] imageBytes) => WzImage.Parse(imageBytes);
+
+    /// <summary>
+    /// Serializes this property tree into WZ <c>.img</c> binary format.
+    /// </summary>
+    public byte[] ToBytes() => WzImage.Serialize(this);
+
+    /// <summary>
+    /// Renders this property tree as formatted JSON (summarizing canvas and sound payloads).
     /// </summary>
     public string ToJson(int indent = 0) => WzImage.ToJson(this, indent);
+
+    public IEnumerator<WzProperty> GetEnumerator() {
+        return (MutableChildren ?? Enumerable.Empty<WzProperty>()).GetEnumerator();
+    }
+
+    IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 }

@@ -20,26 +20,23 @@ public class WzArchiveTests {
         Assert.Equal(63, archiveBytes.Length);
 
         using WzArchive ar = WzArchive.FromBytes(archiveBytes, "String");
-        Assert.Equal(WzCrypto.ClientVersion, ar.Version);
+        Assert.Equal(WzArchive.DefaultVersion, ar.Version);
         Assert.Equal(WzCrypto.ClientVersionHash, ar.VersionHash);
         Assert.Equal((ushort) 34, ar.Header.EncVer);
         Assert.Equal(0x3Cu, ar.Header.FStart);
-        Assert.Empty(ar.Root.Children);
+        Assert.Empty(ar.Nodes);
         Assert.Equal((0, 0), ar.Root.CountRecursive());
     }
 
     [Fact]
     public void DirectoryTree_SupportsNestedDirectoriesPaddingAndType2Dereference() {
-        // Build a synthetic archive containing:
-        // - type 1 padding entry (10 skipped bytes)
-        // - type 3 subdirectory "SubDir" containing "Child.img"
-        // - type 2 dereferenced entry pointing to an earlier type-4 "Ref.img" name
         const uint fstart = 0x3C;
         uint vh = WzCrypto.VersionHash(779);
 
-        var rootImage = new WzOwnedValue.Object();
-        rootImage.SetPath("info/id", new WzOwnedValue.Int(100));
-        byte[] imgBytes = rootImage.SerializeImage();
+        var rootImage = new WzValue.Object {
+            ["info/id"] = 100,
+        };
+        byte[] imgBytes = rootImage.ToBytes();
 
         // Build header up to fstart (60 bytes)
         var writer = new WzWriter();
@@ -63,26 +60,23 @@ public class WzArchiveTests {
         // Entry 1: type 3 ("SubDir")
         writer.U8(3);
         writer.String("SubDir");
-        writer.CompressedI32(0); // size
-        writer.CompressedI32(0); // checksum
+        writer.CompressedI32(0);
+        writer.CompressedI32(0);
         int subDirOffsetFieldPos = writer.Length;
-        writer.U32(0); // placeholder offset
+        writer.U32(0);
 
-        // Entry 2: type 4 ("Direct.img") - we'll also reference this name via type 2 in SubDir!
-        int directTypePos = writer.Length; // points to the `4` byte
+        // Entry 2: type 4 ("Direct.img")
+        int directTypePos = writer.Length;
         writer.U8(4);
         writer.String("Direct.img");
         writer.CompressedI32(imgBytes.Length);
         writer.CompressedI32(WzCrypto.Checksum(imgBytes));
         int directOffsetFieldPos = writer.Length;
-        writer.U32(0); // placeholder offset
+        writer.U32(0);
 
         // SubDir content starts here
         int subDirStart = writer.Length;
-        writer.CompressedI32(1); // 1 child in SubDir
-        // Use type 2 dereference pointing back to "Direct.img":
-        // Archive reader computes: at = fstart + 1 + rel, and reads real type at `data[at - 1]` and string at `at`.
-        // Since `directTypePos` is the position of the type byte `4`, `at` should be `directTypePos + 1`.
+        writer.CompressedI32(1);
         int rel = (directTypePos + 1) - ((int) fstart + 1);
         writer.U8(2);
         writer.I32(rel);
@@ -114,22 +108,22 @@ public class WzArchiveTests {
         Assert.Equal(779, ar.Version);
         Assert.Equal((1, 2), ar.Root.CountRecursive());
 
-        WzNode? subDir = ar.Root.Get("SubDir");
+        WzNode? subDir = ar["SubDir"];
         Assert.NotNull(subDir);
         Assert.True(subDir.IsDir);
 
-        WzNode? derefChild = ar.Root.Get("SubDir/Direct.img");
+        WzNode? derefChild = ar["SubDir/Direct.img"];
         Assert.NotNull(derefChild);
         Assert.True(derefChild.IsImage);
 
-        WzValue parsed = ar.ParseImage("SubDir/Direct.img");
-        Assert.Equal(100L, parsed.Get("info/id")?.AsInt64());
+        // Parse directly from node or via sub-path into the image
+        Assert.Equal(100, derefChild.ParseImage()["info/id"]?.AsInt());
+        Assert.Equal(100, (int) ar.ParseImage("SubDir/Direct.img/info/id"));
     }
 
     [Fact]
     public void ImageBytes_OnDirectoryOrOutOfBounds_ThrowsOutOfBoundsException() {
-        byte[] archiveBytes = WzWriter.WriteArchive(779, []);
-        using WzArchive ar = WzArchive.FromBytes(archiveBytes, "Stub");
+        using var ar = new WzArchive();
 
         WzException dirEx = Assert.Throws<WzException>(() => ar.ImageBytes(ar.Root));
         Assert.Equal(WzErrorKind.OutOfBounds, dirEx.Kind);
@@ -140,8 +134,8 @@ public class WzArchiveTests {
     }
 
     [Fact]
-    public void TreeArchive_ReturnsExpectedFilePath() {
-        string path = WzArchive.TreeArchive("/data/mscw", "String");
+    public void TreeArchivePath_ReturnsExpectedFilePath() {
+        string path = WzArchive.TreeArchivePath("/data/mscw", "String");
         Assert.Equal(Path.Combine("/data/mscw", "String", "String_000.wz"), path);
     }
 }

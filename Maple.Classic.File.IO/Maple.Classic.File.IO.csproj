@@ -18,6 +18,10 @@
     </PropertyGroup>
 
     <ItemGroup>
+        <InternalsVisibleTo Include="Maple.Classic.File.Tests" />
+    </ItemGroup>
+
+    <ItemGroup>
         <None Include="..\README.md" Pack="true" PackagePath="\" Link="README.md" Condition="Exists('..\README.md')" />
     </ItemGroup>
 

@@ -5,21 +5,12 @@ using Maple.Classic.File.IO.Crypto;
 namespace Maple.Classic.File.IO;
 
 /// <summary>
-/// Cursor over a WZ archive or image buffer: primitives, obfuscated strings, and encrypted offsets.
-/// The <c>mscw</c> client uses a zero string key, so decoding uses the positional XOR mask alone.
+/// Internal cursor over a WZ archive or image buffer: primitives, obfuscated strings, and encrypted offsets.
 /// </summary>
-public class WzReader {
+internal class WzReader {
     public byte[] Data { get; }
     public int Position { get; private set; }
-
-    /// <summary>
-    /// Start of the content section; directory offsets are relative to this.
-    /// </summary>
     public uint FStart { get; }
-
-    /// <summary>
-    /// Version hash used to decrypt directory entry offsets.
-    /// </summary>
     public uint VersionHash { get; }
 
     public int Remaining => Math.Max(0, Data.Length - Position);
@@ -121,9 +112,6 @@ public class WzReader {
 
     public double F64() => ReadDouble();
 
-    /// <summary>
-    /// Compressed int: one signed byte, or <c>-128</c> escaping to a full <see cref="int"/>.
-    /// </summary>
     public int ReadCompressedInt32() {
         sbyte b = ReadSByte();
         return b == sbyte.MinValue ? ReadInt32() : b;
@@ -131,9 +119,6 @@ public class WzReader {
 
     public int CompressedI32() => ReadCompressedInt32();
 
-    /// <summary>
-    /// Compressed long: one signed byte, or <c>-128</c> escaping to a full <see cref="long"/>.
-    /// </summary>
     public long ReadCompressedInt64() {
         sbyte b = ReadSByte();
         return b == sbyte.MinValue ? unchecked((long) ReadUInt64()) : b;
@@ -141,9 +126,6 @@ public class WzReader {
 
     public long CompressedI64() => ReadCompressedInt64();
 
-    /// <summary>
-    /// Compressed float: <c>0x80</c> escapes to a full <see cref="float"/>, anything else is <c>0.0f</c>.
-    /// </summary>
     public float ReadCompressedSingle() {
         byte b = ReadByte();
         return b == 0x80 ? ReadSingle() : 0.0f;
@@ -151,10 +133,6 @@ public class WzReader {
 
     public float CompressedF32() => ReadCompressedSingle();
 
-    /// <summary>
-    /// Reads an obfuscated WZ string. Negative length = ASCII/Latin-1, positive = UTF-16LE.
-    /// ASCII escapes on <c>-128</c>, UTF-16 escapes on <c>127</c>; both then read a full <see cref="int"/> length.
-    /// </summary>
     public string ReadString() {
         sbyte tag = ReadSByte();
         if (tag == 0) {
@@ -171,7 +149,6 @@ public class WzReader {
             char[] chars = new char[n];
             for (int k = 0; k < n; k++) {
                 byte decoded = (byte) (raw[k] ^ unchecked((byte) (WzCrypto.AsciiMask + (byte) k)));
-                // WZ "ASCII" is Latin-1/CP949 bytes; map 1:1 to char so no byte is lost.
                 chars[k] = (char) decoded;
             }
             return new string(chars);
@@ -199,10 +176,6 @@ public class WzReader {
 
     public string String() => ReadString();
 
-    /// <summary>
-    /// Reads a string that may live elsewhere in the archive or image (used by image property names and string values).
-    /// <paramref name="baseOffset"/> is the origin that offsets are relative to.
-    /// </summary>
     public string ReadStringAt(int baseOffset, ReadOnlySpan<byte> inlineTags, ReadOnlySpan<byte> derefTags) {
         byte tag = ReadByte();
         if (inlineTags.Contains(tag)) {
@@ -218,7 +191,6 @@ public class WzReader {
             return s;
         }
 
-        // Unknown tag: treat as inline, which is what the client does in practice.
         Position -= 1;
         return ReadString();
     }
@@ -226,9 +198,6 @@ public class WzReader {
     public string StringAt(int baseOffset, ReadOnlySpan<byte> inlineTags, ReadOnlySpan<byte> derefTags) =>
         ReadStringAt(baseOffset, inlineTags, derefTags);
 
-    /// <summary>
-    /// Decrypts a directory entry offset at the current <see cref="Position"/> and consumes the 4-byte field.
-    /// </summary>
     public uint DecryptOffset() {
         uint fieldPos = (uint) Position;
         uint encrypted = ReadUInt32();
