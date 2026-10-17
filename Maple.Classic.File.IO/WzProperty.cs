@@ -63,22 +63,22 @@ public abstract record WzValue : IEnumerable<WzProperty> {
     }
 
     /// <summary>
-    /// <c>Canvas</c> — image dimensions, format, compressed pixel payload, and child properties (<c>origin</c>, <c>z</c>, <c>_outlink</c>, etc.).
+    /// <c>Canvas</c> — image dimensions, format, zero-copy pixel payload slice, and child properties (<c>origin</c>, <c>z</c>, <c>_outlink</c>, etc.).
     /// </summary>
     public sealed record Canvas(
         int width,
         int height,
         int format,
-        byte[] payload,
+        ReadOnlyMemory<byte> payload,
         List<WzProperty>? properties = null) : WzValue {
         public int Width { get; set; } = width;
         public int Height { get; set; } = height;
         public int Format { get; set; } = format;
-        public byte[] Payload { get; set => field = value ?? []; } = payload ?? [];
+        public ReadOnlyMemory<byte> Payload { get; set; } = payload;
         public List<WzProperty> Properties { get; set => field = value ?? []; } = properties ?? [];
 
         internal int DataOffset { get; init; }
-        internal int DataLength { get; init; } = payload?.Length ?? 0;
+        internal int DataLength { get; init; } = payload.Length;
 
         public bool Equals(Canvas? other) {
             if (ReferenceEquals(this, other)) return true;
@@ -86,7 +86,7 @@ public abstract record WzValue : IEnumerable<WzProperty> {
             return Width == other.Width
                 && Height == other.Height
                 && Format == other.Format
-                && Payload.AsSpan().SequenceEqual(other.Payload)
+                && Payload.Span.SequenceEqual(other.Payload.Span)
                 && Properties.SequenceEqual(other.Properties);
         }
 
@@ -95,7 +95,7 @@ public abstract record WzValue : IEnumerable<WzProperty> {
             hc.Add(Width);
             hc.Add(Height);
             hc.Add(Format);
-            hc.AddBytes(Payload);
+            hc.AddBytes(Payload.Span);
             foreach (WzProperty p in Properties) {
                 hc.Add(p);
             }
@@ -230,7 +230,7 @@ public abstract record WzValue : IEnumerable<WzProperty> {
         _ => null,
     };
 
-    public WzValue? this[string path] {
+    public WzValue? this[ReadOnlySpan<char> path] {
         get => Get(path);
         set {
             if (value is null) {
@@ -273,40 +273,62 @@ public abstract record WzValue : IEnumerable<WzProperty> {
     }
 
     /// <summary>
-    /// Sets a property at a <c>/</c>-separated path, creating intermediate <see cref="Object"/> nodes as needed.
+    /// Sets a property at a <c>/</c>-separated path, creating intermediate <see cref="Object"/> nodes as needed without array allocations.
     /// </summary>
-    public void Set(string path, WzValue value) {
+    public void Set(ReadOnlySpan<char> path, WzValue value) {
         ArgumentNullException.ThrowIfNull(value);
-        string[] parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length == 0) {
+
+        path = path.Trim('/');
+        if (path.IsEmpty) {
             return;
         }
 
-        string leaf = parts[^1];
         WzValue cur = this;
-        for (int i = 0; i < parts.Length - 1; i++) {
-            string part = parts[i];
-            if (cur.GetDirect(part) is null) {
-                cur.SetDirect(part, new Object());
+        while (true) {
+            int slash = path.IndexOf('/');
+            if (slash < 0) {
+                cur.SetDirect(path, value);
+                return;
             }
-            cur = cur.GetDirect(part)!;
+
+            ReadOnlySpan<char> part = path[..slash];
+            path = path[(slash + 1)..].TrimStart('/');
+            if (part.IsEmpty) {
+                continue;
+            }
+
+            WzValue? next = cur.GetDirect(part);
+            if (next is null) {
+                next = new Object();
+                cur.SetDirect(part, next);
+            }
+            cur = next;
         }
-        cur.SetDirect(leaf, value);
     }
 
     /// <summary>
-    /// Removes the property at a <c>/</c>-separated path. Returns <c>true</c> if a property was removed.
+    /// Removes the property at a <c>/</c>-separated path without intermediate array allocations. Returns <c>true</c> if a property was removed.
     /// </summary>
-    public bool Remove(string path) {
-        string[] parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length == 0) {
+    public bool Remove(ReadOnlySpan<char> path) {
+        path = path.Trim('/');
+        if (path.IsEmpty) {
             return false;
         }
 
-        string leaf = parts[^1];
         WzValue cur = this;
-        for (int i = 0; i < parts.Length - 1; i++) {
-            WzValue? next = cur.GetDirect(parts[i]);
+        while (true) {
+            int slash = path.IndexOf('/');
+            if (slash < 0) {
+                break;
+            }
+
+            ReadOnlySpan<char> part = path[..slash];
+            path = path[(slash + 1)..].TrimStart('/');
+            if (part.IsEmpty) {
+                continue;
+            }
+
+            WzValue? next = cur.GetDirect(part);
             if (next is null) {
                 return false;
             }
@@ -318,9 +340,13 @@ public abstract record WzValue : IEnumerable<WzProperty> {
             return false;
         }
 
-        int before = kids.Count;
-        kids.RemoveAll(p => p.Name == leaf);
-        return kids.Count != before;
+        for (int i = kids.Count - 1; i >= 0; i--) {
+            if (kids[i].Name.AsSpan().SequenceEqual(path)) {
+                kids.RemoveAt(i);
+                return true;
+            }
+        }
+        return false;
     }
 
     private WzValue? GetDirect(ReadOnlySpan<char> name) {
@@ -336,21 +362,21 @@ public abstract record WzValue : IEnumerable<WzProperty> {
         return null;
     }
 
-    private void SetDirect(string name, WzValue value) {
+    private void SetDirect(ReadOnlySpan<char> name, WzValue value) {
         List<WzProperty>? kids = MutableChildren;
         if (kids is null) {
             return;
         }
         for (int i = 0; i < kids.Count; i++) {
-            if (kids[i].Name == name) {
-                kids[i] = new WzProperty(name, value);
+            if (kids[i].Name.AsSpan().SequenceEqual(name)) {
+                kids[i] = kids[i] with { Value = value };
                 return;
             }
         }
-        kids.Add(new WzProperty(name, value));
+        kids.Add(new WzProperty(name.ToString(), value));
     }
 
-    public bool ReplaceCanvasPixels(string path, int width, int height, int format, byte[] payload) {
+    public bool ReplaceCanvasPixels(ReadOnlySpan<char> path, int width, int height, int format, ReadOnlyMemory<byte> payload) {
         if (Get(path) is Canvas canvas) {
             canvas.Width = width;
             canvas.Height = height;
@@ -370,10 +396,10 @@ public abstract record WzValue : IEnumerable<WzProperty> {
             if (idx < 0) {
                 return null;
             }
-            string imgPart = link[..(idx + 4)];
-            string innerPath = link[(idx + 5)..];
+            ReadOnlySpan<char> imgPart = link.AsSpan(0, idx + 4);
+            ReadOnlySpan<char> innerPath = link.AsSpan(idx + 5);
             int lastSlash = imgPart.LastIndexOf('/');
-            string imgName = lastSlash >= 0 ? imgPart[(lastSlash + 1)..] : imgPart;
+            string imgName = (lastSlash >= 0 ? imgPart[(lastSlash + 1)..] : imgPart).ToString();
 
             if (!cache.TryGetValue(imgName, out WzValue? parsedCanvasImg)) {
                 WzNode? node = canvasArchive[imgName];
@@ -406,8 +432,8 @@ public abstract record WzValue : IEnumerable<WzProperty> {
                 canvasNode.Width = targetCanvas.Width;
                 canvasNode.Height = targetCanvas.Height;
                 canvasNode.Format = targetCanvas.Format;
-                canvasNode.Payload = [.. targetCanvas.Payload];
-                canvasNode.Properties.RemoveAll(p => p.Name == "_outlink");
+                canvasNode.Payload = targetCanvas.Payload;
+                canvasNode.Properties.RemoveAll(static p => p.Name == "_outlink");
                 filled++;
             }
         }
@@ -446,6 +472,8 @@ public abstract record WzValue : IEnumerable<WzProperty> {
     // -------------------------------------------------------------------------
     // Parsing & Serialization
     // -------------------------------------------------------------------------
+
+    public static WzValue Parse(ReadOnlyMemory<byte> imageBytes) => WzImage.Parse(imageBytes);
 
     public static WzValue Parse(byte[] imageBytes) => WzImage.Parse(imageBytes);
 

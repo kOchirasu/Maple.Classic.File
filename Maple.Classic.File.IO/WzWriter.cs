@@ -1,111 +1,151 @@
 using System.Buffers.Binary;
-using System.Runtime.InteropServices;
+using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Text;
 using Maple.Classic.File.IO.Crypto;
 
 namespace Maple.Classic.File.IO;
 
-internal sealed record WzImageEntry(string Name, byte[] Bytes);
+internal sealed record WzImageEntry(string Name, ReadOnlyMemory<byte> Bytes);
 
 /// <summary>
-/// Internal byte-level WZ encoders and archive builder.
+/// Internal contiguous-buffer WZ binary encoder and archive builder.
 /// </summary>
 internal class WzWriter(int capacity = 256) {
-    private readonly List<byte> buf = new(capacity);
+    private byte[] buf = new byte[Math.Max(capacity, 64)];
+    private int pos;
 
-    public int Length => buf.Count;
+    public int Length => pos;
 
-    public ReadOnlySpan<byte> AsSpan() => CollectionsMarshal.AsSpan(buf);
+    public ReadOnlySpan<byte> AsSpan() => buf.AsSpan(0, pos);
 
-    public Span<byte> AsMutableSpan() => CollectionsMarshal.AsSpan(buf);
+    public Span<byte> AsMutableSpan() => buf.AsSpan(0, pos);
 
-    public byte[] ToArray() => [.. buf];
+    public byte[] ToArray() => buf.AsSpan(0, pos).ToArray();
 
-    public void WriteByte(byte v) => buf.Add(v);
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private Span<byte> AllocateSpan(int count) {
+        int required = pos + count;
+        if (required > buf.Length) {
+            Grow(required);
+        }
+        Span<byte> slice = buf.AsSpan(pos, count);
+        pos = required;
+        return slice;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void Grow(int required) {
+        uint nextPow2 = BitOperations.RoundUpToPowerOf2((uint) required);
+        int newSize = (int) Math.Max(nextPow2, (uint) (buf.Length * 2));
+        Array.Resize(ref buf, newSize);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteByte(byte v) {
+        if (pos >= buf.Length) {
+            Grow(pos + 1);
+        }
+        buf[pos++] = v;
+    }
 
     public void U8(byte v) => WriteByte(v);
 
-    public void WriteBytes(ReadOnlySpan<byte> bytes) => buf.AddRange(bytes);
-
-    public void WriteUInt16(ushort v) {
-        Span<byte> tmp = stackalloc byte[2];
-        BinaryPrimitives.WriteUInt16LittleEndian(tmp, v);
-        buf.AddRange(tmp);
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteBytes(ReadOnlySpan<byte> bytes) {
+        if (!bytes.IsEmpty) {
+            bytes.CopyTo(AllocateSpan(bytes.Length));
+        }
     }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteUInt16(ushort v) => BinaryPrimitives.WriteUInt16LittleEndian(AllocateSpan(2), v);
 
     public void U16(ushort v) => WriteUInt16(v);
 
-    public void WriteInt16(short v) {
-        Span<byte> tmp = stackalloc byte[2];
-        BinaryPrimitives.WriteInt16LittleEndian(tmp, v);
-        buf.AddRange(tmp);
-    }
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteInt16(short v) => BinaryPrimitives.WriteInt16LittleEndian(AllocateSpan(2), v);
 
     public void I16(short v) => WriteInt16(v);
 
-    public void WriteUInt32(uint v) {
-        Span<byte> tmp = stackalloc byte[4];
-        BinaryPrimitives.WriteUInt32LittleEndian(tmp, v);
-        buf.AddRange(tmp);
-    }
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteUInt32(uint v) => BinaryPrimitives.WriteUInt32LittleEndian(AllocateSpan(4), v);
 
     public void U32(uint v) => WriteUInt32(v);
 
-    public void WriteInt32(int v) {
-        Span<byte> tmp = stackalloc byte[4];
-        BinaryPrimitives.WriteInt32LittleEndian(tmp, v);
-        buf.AddRange(tmp);
-    }
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteInt32(int v) => BinaryPrimitives.WriteInt32LittleEndian(AllocateSpan(4), v);
 
     public void I32(int v) => WriteInt32(v);
 
-    public void WriteUInt64(ulong v) {
-        Span<byte> tmp = stackalloc byte[8];
-        BinaryPrimitives.WriteUInt64LittleEndian(tmp, v);
-        buf.AddRange(tmp);
-    }
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteUInt64(ulong v) => BinaryPrimitives.WriteUInt64LittleEndian(AllocateSpan(8), v);
 
     public void U64(ulong v) => WriteUInt64(v);
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void WriteDouble(double v) => WriteUInt64(BitConverter.DoubleToUInt64Bits(v));
 
     public void F64(double v) => WriteDouble(v);
 
+    /// <summary>
+    /// Reserves 4 bytes in the buffer for a length or offset field to be patched later via <see cref="PatchU32"/>.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public int ReserveU32() {
+        int offset = pos;
+        AllocateSpan(4).Clear();
+        return offset;
+    }
+
+    /// <summary>
+    /// Patches a 4-byte unsigned integer at a previously reserved <paramref name="offset"/>.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void PatchU32(int offset, uint value) =>
+        BinaryPrimitives.WriteUInt32LittleEndian(buf.AsSpan(offset, 4), value);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void WriteCompressedInt32(int v) {
         if (v is > sbyte.MinValue and <= sbyte.MaxValue) {
             WriteByte(unchecked((byte) (sbyte) v));
         } else {
-            WriteByte(0x80);
-            WriteInt32(v);
+            Span<byte> dst = AllocateSpan(5);
+            dst[0] = 0x80;
+            BinaryPrimitives.WriteInt32LittleEndian(dst[1..], v);
         }
     }
 
     public void CompressedI32(int v) => WriteCompressedInt32(v);
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void WriteCompressedInt64(long v) {
         if (v is > sbyte.MinValue and <= sbyte.MaxValue) {
             WriteByte(unchecked((byte) (sbyte) v));
         } else {
-            WriteByte(0x80);
-            WriteUInt64(unchecked((ulong) v));
+            Span<byte> dst = AllocateSpan(9);
+            dst[0] = 0x80;
+            BinaryPrimitives.WriteUInt64LittleEndian(dst[1..], unchecked((ulong) v));
         }
     }
 
     public void CompressedI64(long v) => WriteCompressedInt64(v);
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void WriteCompressedSingle(float v) {
         if (v == 0.0f) {
             WriteByte(0);
         } else {
-            WriteByte(0x80);
-            WriteUInt32(BitConverter.SingleToUInt32Bits(v));
+            Span<byte> dst = AllocateSpan(5);
+            dst[0] = 0x80;
+            BinaryPrimitives.WriteUInt32LittleEndian(dst[1..], BitConverter.SingleToUInt32Bits(v));
         }
     }
 
     public void CompressedF32(float v) => WriteCompressedSingle(v);
 
-    public void WriteString(string s) {
-        if (string.IsNullOrEmpty(s)) {
+    public void WriteString(ReadOnlySpan<char> s) {
+        if (s.IsEmpty) {
             WriteByte(0);
             return;
         }
@@ -113,47 +153,50 @@ internal class WzWriter(int capacity = 256) {
         if (Ascii.IsValid(s)) {
             int n = s.Length;
             if (n >= 128) {
-                WriteByte(0x80);
-                WriteInt32(n);
+                Span<byte> header = AllocateSpan(5);
+                header[0] = 0x80;
+                BinaryPrimitives.WriteInt32LittleEndian(header[1..], n);
             } else {
                 WriteByte(unchecked((byte) (sbyte) (-n)));
             }
 
+            Span<byte> payload = AllocateSpan(n);
             for (int k = 0; k < n; k++) {
-                byte b = (byte) s[k];
-                WriteByte((byte) (b ^ unchecked((byte) (WzCrypto.AsciiMask + (byte) k))));
+                payload[k] = (byte) ((byte) s[k] ^ unchecked((byte) (WzCrypto.AsciiMask + (byte) k)));
             }
         } else {
             int n = s.Length;
             if (n >= 127) {
-                WriteByte(127);
-                WriteInt32(n);
+                Span<byte> header = AllocateSpan(5);
+                header[0] = 127;
+                BinaryPrimitives.WriteInt32LittleEndian(header[1..], n);
             } else {
                 WriteByte((byte) n);
             }
 
+            Span<byte> payload = AllocateSpan(n * 2);
             for (int k = 0; k < n; k++) {
-                ushort u = s[k];
-                WriteUInt16((ushort) (u ^ unchecked((ushort) (WzCrypto.UnicodeMask + (ushort) k))));
+                ushort u = (ushort) (s[k] ^ unchecked((ushort) (WzCrypto.UnicodeMask + (ushort) k)));
+                BinaryPrimitives.WriteUInt16LittleEndian(payload.Slice(k * 2, 2), u);
             }
         }
     }
 
-    public void String(string s) => WriteString(s);
+    public void String(ReadOnlySpan<char> s) => WriteString(s);
 
-    public void WriteImageString(string s) {
+    public void WriteImageString(ReadOnlySpan<char> s) {
         WriteByte(0x00);
         WriteString(s);
     }
 
-    public void ImageString(string s) => WriteImageString(s);
+    public void ImageString(ReadOnlySpan<char> s) => WriteImageString(s);
 
-    public void WriteTypeString(string s) {
+    public void WriteTypeString(ReadOnlySpan<char> s) {
         WriteByte(0x73);
         WriteString(s);
     }
 
-    public void TypeString(string s) => WriteTypeString(s);
+    public void TypeString(ReadOnlySpan<char> s) => WriteTypeString(s);
 
     public static byte[] WriteArchive(ushort version, IReadOnlyList<WzImageEntry> images) {
         ArgumentNullException.ThrowIfNull(images);
@@ -162,27 +205,28 @@ internal class WzWriter(int capacity = 256) {
         byte[] copyrightBytes = Encoding.UTF8.GetBytes(WzCrypto.Copyright);
         uint fstart = (uint) (4 + 8 + 4 + copyrightBytes.Length + 1); // 0x3C
 
-        var dir = new WzWriter();
+        var dir = new WzWriter(images.Count * 24 + 16);
         dir.U16(WzCrypto.EncVersion(version));
         dir.CompressedI32(images.Count);
 
         var offsetFields = new int[images.Count];
+        int totalPayloadSize = 0;
         for (int i = 0; i < images.Count; i++) {
             WzImageEntry img = images[i];
+            ReadOnlySpan<byte> imgSpan = img.Bytes.Span;
             dir.U8(4);
             dir.String(img.Name);
-            dir.CompressedI32(img.Bytes.Length);
-            dir.CompressedI32(WzCrypto.Checksum(img.Bytes));
-            offsetFields[i] = dir.Length;
-            dir.U32(0);
+            dir.CompressedI32(imgSpan.Length);
+            dir.CompressedI32(WzCrypto.Checksum(imgSpan));
+            offsetFields[i] = dir.ReserveU32();
+            totalPayloadSize += imgSpan.Length;
         }
 
         int pos = (int) fstart + dir.Length;
-        Span<byte> dirSpan = dir.AsMutableSpan();
         for (int i = 0; i < images.Count; i++) {
             uint fieldPos = (uint) ((int) fstart + offsetFields[i]);
             uint enc = WzCrypto.EncryptOffset(fieldPos, fstart, vh, (uint) pos);
-            BinaryPrimitives.WriteUInt32LittleEndian(dirSpan.Slice(offsetFields[i], 4), enc);
+            dir.PatchU32(offsetFields[i], enc);
             pos += images[i].Bytes.Length;
         }
 
@@ -200,9 +244,9 @@ internal class WzWriter(int capacity = 256) {
         cursor += dir.Length;
 
         for (int i = 0; i < images.Count; i++) {
-            byte[] imgBytes = images[i].Bytes;
-            imgBytes.CopyTo(outSpan.Slice(cursor, imgBytes.Length));
-            cursor += imgBytes.Length;
+            ReadOnlySpan<byte> imgSpan = images[i].Bytes.Span;
+            imgSpan.CopyTo(outSpan.Slice(cursor, imgSpan.Length));
+            cursor += imgSpan.Length;
         }
 
         return output;
@@ -215,7 +259,7 @@ internal class WzWriter(int capacity = 256) {
             if (node.IsDir) {
                 throw WzException.BadEntryType(3, (int) node.Offset);
             }
-            output.Add(new WzImageEntry(node.Name, archive.ImageBytes(node)));
+            output.Add(new WzImageEntry(node.Name, archive.GetImageMemory(node)));
         }
         return output;
     }
@@ -251,8 +295,7 @@ internal class WzWriter(int capacity = 256) {
         return output;
     }
 
-    public static void VerifyArchive(byte[] bytes, ushort version, IReadOnlyList<WzImageEntry> images) {
-        ArgumentNullException.ThrowIfNull(bytes);
+    public static void VerifyArchive(ReadOnlySpan<byte> bytes, ushort version, IReadOnlyList<WzImageEntry> images) {
         ArgumentNullException.ThrowIfNull(images);
 
         WzHeader header = WzArchive.ParseHeader(bytes);
@@ -277,12 +320,13 @@ internal class WzWriter(int capacity = 256) {
             int size = r.ReadCompressedInt32();
             int sum = r.ReadCompressedInt32();
             uint off = r.DecryptOffset();
+            ReadOnlySpan<byte> expectedSpan = img.Bytes.Span;
 
-            if (name != img.Name || size != img.Bytes.Length || sum != WzCrypto.Checksum(img.Bytes)) {
+            if (name != img.Name || size != expectedSpan.Length || sum != WzCrypto.Checksum(expectedSpan)) {
                 throw WzException.OutOfBounds(name, off, size, bytes.Length);
             }
 
-            if ((long) off + size > bytes.Length || !bytes.AsSpan((int) off, size).SequenceEqual(img.Bytes)) {
+            if ((long) off + size > bytes.Length || !bytes.Slice((int) off, size).SequenceEqual(expectedSpan)) {
                 throw WzException.OutOfBounds(name, off, size, bytes.Length);
             }
         }

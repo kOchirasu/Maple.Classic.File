@@ -5,35 +5,37 @@ using Maple.Classic.File.IO.Crypto;
 namespace Maple.Classic.File.IO;
 
 /// <summary>
-/// Internal cursor over a WZ archive or image buffer: primitives, obfuscated strings, and encrypted offsets.
+/// Internal zero-allocation stack cursor over a WZ archive or image span.
 /// </summary>
-internal class WzReader(byte[] data, uint fstart = 0, uint versionHash = 0) {
-    public byte[] Data { get; } = data ?? throw new ArgumentNullException(nameof(data));
+internal ref struct WzReader(ReadOnlySpan<byte> data, uint fstart = 0, uint versionHash = 0) {
+    public ReadOnlySpan<byte> Data { get; } = data;
     public int Position { get; private set; }
     public uint FStart { get; } = fstart;
     public uint VersionHash { get; } = versionHash;
 
-    public int Remaining => Math.Max(0, Data.Length - Position);
+    public readonly int Remaining => Math.Max(0, Data.Length - Position);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Seek(int pos) => Position = pos;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void Need(int n) {
+    private readonly void Need(int n) {
         if (n < 0 || Remaining < n) {
             throw WzException.UnexpectedEof(Position, Math.Max(0, n), Remaining);
         }
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public ReadOnlySpan<byte> Take(int n) {
         Need(n);
-        ReadOnlySpan<byte> slice = Data.AsSpan(Position, n);
+        ReadOnlySpan<byte> slice = Data.Slice(Position, n);
         Position += n;
         return slice;
     }
 
     public byte[] ReadBytes(int n) => [.. Take(n)];
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public byte ReadByte() {
         Need(1);
         return Data[Position++];
@@ -41,42 +43,52 @@ internal class WzReader(byte[] data, uint fstart = 0, uint versionHash = 0) {
 
     public byte U8() => ReadByte();
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public sbyte ReadSByte() => unchecked((sbyte) ReadByte());
 
     public sbyte I8() => ReadSByte();
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public ushort ReadUInt16() => BinaryPrimitives.ReadUInt16LittleEndian(Take(2));
 
     public ushort U16() => ReadUInt16();
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public short ReadInt16() => BinaryPrimitives.ReadInt16LittleEndian(Take(2));
 
     public short I16() => ReadInt16();
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public uint ReadUInt32() => BinaryPrimitives.ReadUInt32LittleEndian(Take(4));
 
     public uint U32() => ReadUInt32();
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public int ReadInt32() => BinaryPrimitives.ReadInt32LittleEndian(Take(4));
 
     public int I32() => ReadInt32();
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public ulong ReadUInt64() => BinaryPrimitives.ReadUInt64LittleEndian(Take(8));
 
     public ulong U64() => ReadUInt64();
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public long ReadInt64() => BinaryPrimitives.ReadInt64LittleEndian(Take(8));
 
     public long I64() => ReadInt64();
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public float ReadSingle() => BitConverter.UInt32BitsToSingle(ReadUInt32());
 
     public float F32() => ReadSingle();
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public double ReadDouble() => BitConverter.UInt64BitsToDouble(ReadUInt64());
 
     public double F64() => ReadDouble();
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public int ReadCompressedInt32() {
         sbyte b = ReadSByte();
         return b == sbyte.MinValue ? ReadInt32() : b;
@@ -84,6 +96,7 @@ internal class WzReader(byte[] data, uint fstart = 0, uint versionHash = 0) {
 
     public int CompressedI32() => ReadCompressedInt32();
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public long ReadCompressedInt64() {
         sbyte b = ReadSByte();
         return b == sbyte.MinValue ? unchecked((long) ReadUInt64()) : b;
@@ -91,12 +104,35 @@ internal class WzReader(byte[] data, uint fstart = 0, uint versionHash = 0) {
 
     public long CompressedI64() => ReadCompressedInt64();
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public float ReadCompressedSingle() {
         byte b = ReadByte();
         return b == 0x80 ? ReadSingle() : 0.0f;
     }
 
     public float CompressedF32() => ReadCompressedSingle();
+
+    /// <summary>
+    /// Validates and skips an obfuscated string without allocating a <see cref="string"/> on the heap.
+    /// Used during fast directory probing in version detection.
+    /// </summary>
+    public void SkipString() {
+        sbyte tag = ReadSByte();
+        if (tag == 0) {
+            return;
+        }
+
+        if (tag < 0) {
+            int n = tag == sbyte.MinValue ? ReadInt32() : -tag;
+            Take(n);
+        } else {
+            int n = tag == 127 ? ReadInt32() : tag;
+            if (n is < 0 or > int.MaxValue / 2) {
+                throw WzException.UnexpectedEof(Position, int.MaxValue, Remaining);
+            }
+            Take(n * 2);
+        }
+    }
 
     public string ReadString() {
         sbyte tag = ReadSByte();
@@ -163,6 +199,7 @@ internal class WzReader(byte[] data, uint fstart = 0, uint versionHash = 0) {
     public string StringAt(int baseOffset, ReadOnlySpan<byte> inlineTags, ReadOnlySpan<byte> derefTags) =>
         ReadStringAt(baseOffset, inlineTags, derefTags);
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public uint DecryptOffset() {
         uint fieldPos = (uint) Position;
         uint encrypted = ReadUInt32();

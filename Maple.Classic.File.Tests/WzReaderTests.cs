@@ -108,16 +108,20 @@ public class WzReaderTests {
         ushort encoded = (ushort) (0xD800 ^ 0xAAAA);
         byte[] raw = [0x01, (byte) (encoded & 0xFF), (byte) (encoded >> 8)];
 
-        var r = new WzReader(raw, 0, 0);
-        WzException ex = Assert.Throws<WzException>(() => r.ReadString());
+        WzException ex = Assert.Throws<WzException>(() => {
+            var r = new WzReader(raw, 0, 0);
+            _ = r.ReadString();
+        });
         Assert.Equal(WzErrorKind.BadUtf16, ex.Kind);
     }
 
     [Fact]
     public void UnexpectedEof_ThrowsUnexpectedEofWzException() {
         byte[] raw = [0x01, 0x02];
-        var r = new WzReader(raw, 0, 0);
-        WzException ex = Assert.Throws<WzException>(() => r.ReadUInt32());
+        WzException ex = Assert.Throws<WzException>(() => {
+            var r = new WzReader(raw, 0, 0);
+            _ = r.ReadUInt32();
+        });
         Assert.Equal(WzErrorKind.UnexpectedEof, ex.Kind);
         Assert.Equal(0, ex.Offset);
     }

@@ -142,9 +142,9 @@ public class WzWriterTests {
         Assert.Equal((33, 2, 44), (icon.Width, icon.Format, icon.Payload.Length));
         Assert.Equal((-1, 30), icon["origin"]?.AsVector());
 
-        Assert.False(img.ReplaceCanvasPixels("info/cash", 1, 1, 1, []));
+        Assert.False(img.ReplaceCanvasPixels("info/cash", 1, 1, 1, ReadOnlyMemory<byte>.Empty));
         Assert.Equal(1, img["info/cash"]?.AsInt());
-        Assert.False(img.ReplaceCanvasPixels("info/nothing", 1, 1, 1, []));
+        Assert.False(img.ReplaceCanvasPixels("info/nothing", 1, 1, 1, ReadOnlyMemory<byte>.Empty));
 
         WzValue back = WzValue.Parse(img.ToBytes());
         Assert.Equal([("/info/icon", 33, 33, 2, 44)], back.Canvases());
@@ -242,6 +242,6 @@ public class WzWriterTests {
 
         List<WzImageEntry> merged = WzWriter.MergeImages(baseImages, add);
         Assert.Equal(["b.img", "a.img", "c.img", "d.img", "z.img"], merged.Select(i => i.Name).ToArray());
-        Assert.Equal("22"u8.ToArray(), merged[1].Bytes);
+        Assert.Equal("22"u8.ToArray(), merged[1].Bytes.ToArray());
     }
 }

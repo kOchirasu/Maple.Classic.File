@@ -4,15 +4,14 @@ using System.Text;
 namespace Maple.Classic.File.IO;
 
 /// <summary>
-/// Internal image (<c>.img</c>) property deserialization, serialization, and JSON rendering logic.
+/// Internal image (<c>.img</c>) property deserialization, single-pass binary serialization, and single-pass JSON rendering.
 /// </summary>
 internal static class WzImage {
     public static ReadOnlySpan<byte> NameInline => [0x00, 0x04, 0x73];
     public static ReadOnlySpan<byte> NameDeref => [0x01, 0x1B];
 
-    public static WzValue Parse(byte[] data) {
-        ArgumentNullException.ThrowIfNull(data);
-        var r = new WzReader(data, 0, 0);
+    public static WzValue Parse(ReadOnlyMemory<byte> data) {
+        var r = new WzReader(data.Span, 0, 0);
 
         byte tag = r.ReadByte();
         if (tag is 0x73 or 0x1B or 0x01 or 0x00) {
@@ -20,18 +19,18 @@ internal static class WzImage {
             string ty = r.ReadStringAt(0, NameInline, NameDeref);
             if (ty != "Property") {
                 r.Seek(0);
-                return ReadExtended(r, 0, data.Length);
+                return ReadExtended(ref r, data, 0, data.Length);
             }
         } else {
             r.Seek(0);
-            return ReadExtended(r, 0, data.Length);
+            return ReadExtended(ref r, data, 0, data.Length);
         }
 
         r.ReadUInt16();
-        return new WzValue.Object(ReadPropertyList(r, 0));
+        return new WzValue.Object(ReadPropertyList(ref r, data, 0));
     }
 
-    private static List<WzProperty> ReadPropertyList(WzReader r, int baseOffset) {
+    private static List<WzProperty> ReadPropertyList(ref WzReader r, ReadOnlyMemory<byte> data, int baseOffset) {
         int count = r.ReadCompressedInt32();
         if (count is < 0 or > 500_000) {
             throw WzException.BadPropertyType(0xFF, r.Position);
@@ -40,13 +39,13 @@ internal static class WzImage {
         var output = new List<WzProperty>(Math.Min(count, 1024));
         for (int i = 0; i < count; i++) {
             string name = r.ReadStringAt(baseOffset, NameInline, NameDeref);
-            WzValue value = ReadValue(r, baseOffset);
+            WzValue value = ReadValue(ref r, data, baseOffset);
             output.Add(new WzProperty(name, value));
         }
         return output;
     }
 
-    private static WzValue ReadValue(WzReader r, int baseOffset) {
+    private static WzValue ReadValue(ref WzReader r, ReadOnlyMemory<byte> data, int baseOffset) {
         int start = r.Position;
         byte kind = r.ReadByte();
         return kind switch {
@@ -57,26 +56,26 @@ internal static class WzImage {
             0x04 => new WzValue.Float(r.ReadCompressedSingle()),
             0x05 => new WzValue.Double(r.ReadDouble()),
             0x08 => new WzValue.String(r.ReadStringAt(baseOffset, NameInline, NameDeref)),
-            0x09 => ReadLengthDelimitedExtended(r, baseOffset),
+            0x09 => ReadLengthDelimitedExtended(ref r, data, baseOffset),
             _ => throw WzException.BadPropertyType(kind, start),
         };
     }
 
-    private static WzValue ReadLengthDelimitedExtended(WzReader r, int baseOffset) {
+    private static WzValue ReadLengthDelimitedExtended(ref WzReader r, ReadOnlyMemory<byte> data, int baseOffset) {
         int len = (int) r.ReadUInt32();
         int end = r.Position + len;
-        WzValue v = ReadExtended(r, baseOffset, end);
+        WzValue v = ReadExtended(ref r, data, baseOffset, end);
         r.Seek(end);
         return v;
     }
 
-    private static WzValue ReadExtended(WzReader r, int baseOffset, int end) {
+    private static WzValue ReadExtended(ref WzReader r, ReadOnlyMemory<byte> data, int baseOffset, int end) {
         int start = r.Position;
         string ty = r.ReadStringAt(baseOffset, NameInline, NameDeref);
         switch (ty) {
             case "Property": {
                 r.ReadUInt16();
-                return new WzValue.Object(ReadPropertyList(r, baseOffset));
+                return new WzValue.Object(ReadPropertyList(ref r, data, baseOffset));
             }
 
             case "Canvas": {
@@ -85,7 +84,7 @@ internal static class WzImage {
                 List<WzProperty> children;
                 if (hasChildren) {
                     r.ReadUInt16();
-                    children = ReadPropertyList(r, baseOffset);
+                    children = ReadPropertyList(ref r, data, baseOffset);
                 } else {
                     children = [];
                 }
@@ -97,9 +96,10 @@ internal static class WzImage {
                 int dataLen = rawLen > 0 ? rawLen - 1 : 0;
                 int dataOff = r.Position + 1;
 
-                byte[] payload = [];
-                if (dataLen > 0 && (long) dataOff + dataLen <= r.Data.Length) {
-                    payload = r.Data.AsSpan(dataOff, dataLen).ToArray();
+                // Zero-copy slice directly into the underlying image memory
+                ReadOnlyMemory<byte> payload = ReadOnlyMemory<byte>.Empty;
+                if (dataLen > 0 && (long) dataOff + dataLen <= data.Length) {
+                    payload = data.Slice(dataOff, dataLen);
                 }
 
                 return new WzValue.Canvas(width, height, format, payload, children) {
@@ -118,7 +118,7 @@ internal static class WzImage {
                 int n = Math.Max(0, r.ReadCompressedInt32());
                 var items = new List<WzValue>(Math.Min(n, 1024));
                 for (int i = 0; i < n; i++) {
-                    items.Add(ReadExtended(r, baseOffset, end));
+                    items.Add(ReadExtended(ref r, data, baseOffset, end));
                 }
                 return new WzValue.Convex(items);
             }
@@ -197,11 +197,12 @@ internal static class WzImage {
                 w.ImageString(s);
                 break;
             default: {
-                var body = new WzWriter();
-                WriteExtendedBody(body, v);
+                // Single-pass in-place length backpatching — no intermediate WzWriter or buffer copies
                 w.U8(0x09);
-                w.U32((uint) body.Length);
-                w.WriteBytes(body.AsSpan());
+                int lenFieldPos = w.ReserveU32();
+                int bodyStart = w.Length;
+                WriteExtendedBody(w, v);
+                w.PatchU32(lenFieldPos, (uint) (w.Length - bodyStart));
                 break;
             }
         }
@@ -215,7 +216,8 @@ internal static class WzImage {
                 WriteList(w, props);
                 break;
 
-            case WzValue.Canvas c:
+            case WzValue.Canvas c: {
+                ReadOnlySpan<byte> payloadSpan = c.Payload.Span;
                 w.TypeString("Canvas");
                 w.U8(0);
                 if (c.Properties.Count == 0) {
@@ -230,10 +232,11 @@ internal static class WzImage {
                 w.CompressedI32(c.Format);
                 w.U8(0);
                 w.U32(0);
-                w.I32(c.Payload.Length + 1);
+                w.I32(payloadSpan.Length + 1);
                 w.U8(0);
-                w.WriteBytes(c.Payload);
+                w.WriteBytes(payloadSpan);
                 break;
+            }
 
             case WzValue.Vector(var x, var y):
                 w.TypeString("Shape2D#Vector2D");
@@ -269,78 +272,119 @@ internal static class WzImage {
 
     public static string ToJson(WzValue v, int indent = 0) {
         ArgumentNullException.ThrowIfNull(v);
-        string pad = new(' ', indent * 2);
-        string pad2 = new(' ', (indent + 1) * 2);
+        var sb = new StringBuilder(256);
+        WriteJson(sb, v, indent);
+        return sb.ToString();
+    }
 
+    private static void WriteJson(StringBuilder sb, WzValue v, int indent) {
         switch (v) {
             case WzValue.Null:
-                return "null";
+                sb.Append("null");
+                break;
             case WzValue.Short(var x):
-                return x.ToString(CultureInfo.InvariantCulture);
+                sb.Append(x.ToString(CultureInfo.InvariantCulture));
+                break;
             case WzValue.Int(var x):
-                return x.ToString(CultureInfo.InvariantCulture);
+                sb.Append(x.ToString(CultureInfo.InvariantCulture));
+                break;
             case WzValue.Long(var x):
-                return x.ToString(CultureInfo.InvariantCulture);
+                sb.Append(x.ToString(CultureInfo.InvariantCulture));
+                break;
             case WzValue.Float(var x):
-                return FormatNumber(x);
+                AppendNumber(sb, x);
+                break;
             case WzValue.Double(var x):
-                return FormatNumber(x);
+                AppendNumber(sb, x);
+                break;
             case WzValue.String(var s):
-                return JsonString(s);
+                AppendJsonString(sb, s);
+                break;
             case WzValue.Uol(var s):
-                return JsonString(s);
+                AppendJsonString(sb, s);
+                break;
             case WzValue.Vector(var x, var y):
-                return $"{{ \"x\": {x}, \"y\": {y} }}";
+                sb.Append("{ \"x\": ").Append(x).Append(", \"y\": ").Append(y).Append(" }");
+                break;
             case WzValue.Sound(var dataLen, var duration):
-                return $"{{ \"_sound\": true, \"bytes\": {dataLen}, \"duration\": {duration} }}";
+                sb.Append("{ \"_sound\": true, \"bytes\": ").Append(dataLen)
+                  .Append(", \"duration\": ").Append(duration).Append(" }");
+                break;
             case WzValue.RawData(var dataLen):
-                return $"{{ \"_rawdata\": true, \"bytes\": {dataLen} }}";
+                sb.Append("{ \"_rawdata\": true, \"bytes\": ").Append(dataLen).Append(" }");
+                break;
             case WzValue.Convex(var items): {
-                IEnumerable<string> inner = items.Select(i => ToJson(i, indent + 1));
-                return $"[{string.Join(", ", inner)}]";
+                sb.Append('[');
+                for (int i = 0; i < items.Count; i++) {
+                    if (i > 0) {
+                        sb.Append(", ");
+                    }
+                    WriteJson(sb, items[i], indent + 1);
+                }
+                sb.Append(']');
+                break;
             }
             case WzValue.Canvas c: {
+                int pad = indent * 2;
+                int pad2 = (indent + 1) * 2;
                 int byteLen = c.Payload.Length > 0 ? c.Payload.Length : c.DataLength;
-                var parts = new List<string>(5 + c.Properties.Count) {
-                    $"{pad2}\"_canvas\": true",
-                    $"{pad2}\"width\": {c.Width}",
-                    $"{pad2}\"height\": {c.Height}",
-                    $"{pad2}\"format\": {c.Format}",
-                    $"{pad2}\"bytes\": {byteLen}",
-                };
+
+                sb.Append("{\n");
+                sb.Append(' ', pad2).Append("\"_canvas\": true,\n");
+                sb.Append(' ', pad2).Append("\"width\": ").Append(c.Width).Append(",\n");
+                sb.Append(' ', pad2).Append("\"height\": ").Append(c.Height).Append(",\n");
+                sb.Append(' ', pad2).Append("\"format\": ").Append(c.Format).Append(",\n");
+                sb.Append(' ', pad2).Append("\"bytes\": ").Append(byteLen);
+
                 foreach (WzProperty child in c.Properties) {
-                    parts.Add($"{pad2}{JsonString(child.Name)}: {ToJson(child.Value, indent + 1)}");
+                    sb.Append(",\n").Append(' ', pad2);
+                    AppendJsonString(sb, child.Name);
+                    sb.Append(": ");
+                    WriteJson(sb, child.Value, indent + 1);
                 }
-                return $"{{\n{string.Join(",\n", parts)}\n{pad}}}";
+
+                sb.Append('\n').Append(' ', pad).Append('}');
+                break;
             }
             case WzValue.Object(var props): {
                 if (props.Count == 0) {
-                    return "{}";
+                    sb.Append("{}");
+                    break;
                 }
-                var inner = new List<string>(props.Count);
-                foreach (WzProperty p in props) {
-                    inner.Add($"{pad2}{JsonString(p.Name)}: {ToJson(p.Value, indent + 1)}");
+                int pad = indent * 2;
+                int pad2 = (indent + 1) * 2;
+                sb.Append("{\n");
+                for (int i = 0; i < props.Count; i++) {
+                    if (i > 0) {
+                        sb.Append(",\n");
+                    }
+                    WzProperty p = props[i];
+                    sb.Append(' ', pad2);
+                    AppendJsonString(sb, p.Name);
+                    sb.Append(": ");
+                    WriteJson(sb, p.Value, indent + 1);
                 }
-                return $"{{\n{string.Join(",\n", inner)}\n{pad}}}";
+                sb.Append('\n').Append(' ', pad).Append('}');
+                break;
             }
             default:
                 throw new ArgumentOutOfRangeException(nameof(v));
         }
     }
 
-    private static string FormatNumber(double x) {
+    private static void AppendNumber(StringBuilder sb, double x) {
         if (double.IsFinite(x)) {
             string s = x.ToString("G", CultureInfo.InvariantCulture);
-            if (s.Contains('.') || s.Contains('e') || s.Contains('E')) {
-                return s;
+            sb.Append(s);
+            if (!s.Contains('.') && !s.Contains('e') && !s.Contains('E')) {
+                sb.Append(".0");
             }
-            return $"{s}.0";
+        } else {
+            sb.Append("null");
         }
-        return "null";
     }
 
-    private static string JsonString(string s) {
-        var sb = new StringBuilder(s.Length + 2);
+    private static void AppendJsonString(StringBuilder sb, ReadOnlySpan<char> s) {
         sb.Append('"');
         foreach (char c in s) {
             switch (c) {
@@ -369,6 +413,5 @@ internal static class WzImage {
             }
         }
         sb.Append('"');
-        return sb.ToString();
     }
 }

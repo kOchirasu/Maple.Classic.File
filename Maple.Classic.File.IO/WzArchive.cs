@@ -74,7 +74,17 @@ public class WzNode : IEnumerable<WzNode> {
     }
 
     /// <summary>
-    /// Returns the raw bytes of this image node from its owning <see cref="WzArchive"/>.
+    /// Returns a zero-copy <see cref="ReadOnlyMemory{T}"/> slice over the raw bytes of this image node.
+    /// </summary>
+    public ReadOnlyMemory<byte> GetMemory() {
+        if (Archive is null) {
+            throw new InvalidOperationException($"Node \"{Name}\" is not attached to an archive.");
+        }
+        return Archive.GetImageMemory(this);
+    }
+
+    /// <summary>
+    /// Returns a copy of the raw bytes of this image node from its owning <see cref="WzArchive"/>.
     /// </summary>
     public byte[] GetBytes() {
         if (Archive is null) {
@@ -84,7 +94,7 @@ public class WzNode : IEnumerable<WzNode> {
     }
 
     /// <summary>
-    /// Parses the property tree of this image node directly from its owning <see cref="WzArchive"/>.
+    /// Parses the property tree of this image node directly from its owning <see cref="WzArchive"/> without copying the image buffer.
     /// </summary>
     public WzValue ParseImage() {
         if (Archive is null) {
@@ -184,7 +194,7 @@ public class WzArchive : IDisposable {
     public WzNode? this[ReadOnlySpan<char> path] => Root.Get(path);
 
     /// <summary>
-    /// Resolves an image node by <c>/</c>-separated path and parses its property tree.
+    /// Resolves an image node by <c>/</c>-separated path and parses its property tree without copying the image slice.
     /// If <paramref name="path"/> points inside an image (e.g. <c>"Eqp.img/Eqp/Coat"</c>), returns the property at that subpath.
     /// </summary>
     public WzValue ParseImage(string path) {
@@ -209,9 +219,15 @@ public class WzArchive : IDisposable {
         throw new KeyNotFoundException($"No node found at path \"{path}\".");
     }
 
-    public WzValue ParseImage(WzNode node) => WzImage.Parse(ImageBytes(node));
+    /// <summary>
+    /// Parses the property tree of an image node directly over the archive's memory slice with zero buffer copies.
+    /// </summary>
+    public WzValue ParseImage(WzNode node) => WzImage.Parse(GetImageMemory(node));
 
-    public ReadOnlySpan<byte> GetImageSpan(WzNode node) {
+    /// <summary>
+    /// Returns a zero-copy <see cref="ReadOnlyMemory{T}"/> slice over the raw bytes of an image node.
+    /// </summary>
+    public ReadOnlyMemory<byte> GetImageMemory(WzNode node) {
         ArgumentNullException.ThrowIfNull(node);
         long start = node.Offset;
         long size = Math.Max(0, node.Size);
@@ -219,22 +235,34 @@ public class WzArchive : IDisposable {
         if (node.Kind != WzNodeKind.Image || start < 0 || end > Data.Length) {
             throw WzException.OutOfBounds(node.Name, node.Offset, node.Size, Data.Length);
         }
-        return Data.AsSpan((int) start, (int) size);
+        return Data.AsMemory((int) start, (int) size);
     }
 
+    /// <summary>
+    /// Returns a zero-copy <see cref="ReadOnlySpan{T}"/> over the raw bytes of an image node.
+    /// </summary>
+    public ReadOnlySpan<byte> GetImageSpan(WzNode node) => GetImageMemory(node).Span;
+
+    /// <summary>
+    /// Returns a copy of the raw bytes of an image node.
+    /// </summary>
     public byte[] ImageBytes(WzNode node) => [.. GetImageSpan(node)];
 
     public void SetImage(string name, WzValue image) {
         ArgumentException.ThrowIfNullOrEmpty(name);
         ArgumentNullException.ThrowIfNull(image);
-        SetImage(name, image.ToBytes());
+        SetImage(name, (ReadOnlyMemory<byte>) image.ToBytes());
+    }
+
+    public void SetImage(string name, ReadOnlyMemory<byte> imageBytes) {
+        ArgumentException.ThrowIfNullOrEmpty(name);
+        stagedRemovals.Remove(name);
+        stagedAdditions.Add(new WzImageEntry(name, imageBytes));
     }
 
     public void SetImage(string name, byte[] imageBytes) {
-        ArgumentException.ThrowIfNullOrEmpty(name);
         ArgumentNullException.ThrowIfNull(imageBytes);
-        stagedRemovals.Remove(name);
-        stagedAdditions.Add(new WzImageEntry(name, imageBytes));
+        SetImage(name, (ReadOnlyMemory<byte>) imageBytes);
     }
 
     public bool RemoveImage(string name) {
@@ -287,7 +315,7 @@ public class WzArchive : IDisposable {
 
         var r = new WzReader(data, header.FStart, vhash);
         r.Seek(checked((int) header.FStart + 2));
-        List<WzNode> children = ReadDirectory(r, data);
+        List<WzNode> children = ReadDirectory(ref r, data);
 
         var root = new WzNode(name, WzNodeKind.Directory, 0, 0, 0, children);
         return (header, resolvedVersion, vhash, root);
@@ -321,12 +349,16 @@ public class WzArchive : IDisposable {
         return new WzHeader(fsize, fstart, copyright) { EncVer = encVer };
     }
 
-    internal static ushort DetectVersion(byte[] data, WzHeader header) {
-        ArgumentNullException.ThrowIfNull(data);
+    internal static ushort DetectVersion(ReadOnlySpan<byte> data, WzHeader header) {
         ArgumentNullException.ThrowIfNull(header);
 
-        ushort? firstMatch = null;
+        // Fast-path: check the known client version (779) first before scanning all u16 candidates.
+        if (WzCrypto.EncVersion(WzCrypto.ClientVersion) == header.EncVer
+            && ProbeDirectoryOffsetsInBounds(data, header.FStart, WzCrypto.ClientVersionHash, out bool isEmpty)) {
+            return WzCrypto.ClientVersion;
+        }
 
+        ushort? firstMatch = null;
         for (int v = 0; v <= ushort.MaxValue; v++) {
             ushort candidate = (ushort) v;
             if (WzCrypto.EncVersion(candidate) != header.EncVer) {
@@ -334,25 +366,8 @@ public class WzArchive : IDisposable {
             }
             firstMatch ??= candidate;
 
-            var r = new WzReader(data, header.FStart, WzCrypto.VersionHash(candidate));
-            r.Seek(checked((int) header.FStart + 2));
-            try {
-                List<WzNode> children = ReadDirectoryShallow(r, data);
-                if (children.Count == 0) {
-                    return WzCrypto.ClientVersion;
-                }
-                bool allInBounds = true;
-                foreach (WzNode n in children) {
-                    if (n.Offset >= (uint) data.Length) {
-                        allInBounds = false;
-                        break;
-                    }
-                }
-                if (allInBounds) {
-                    return candidate;
-                }
-            } catch (WzException) {
-                // Wrong version guess failed directory decode; keep probing.
+            if (ProbeDirectoryOffsetsInBounds(data, header.FStart, WzCrypto.VersionHash(candidate), out isEmpty)) {
+                return isEmpty ? WzCrypto.ClientVersion : candidate;
             }
         }
 
@@ -363,7 +378,67 @@ public class WzArchive : IDisposable {
         throw WzException.VersionNotFound(header.EncVer);
     }
 
-    private static (string Name, WzNodeKind Kind)? ReadEntryHeader(WzReader r, byte[] data) {
+    /// <summary>
+    /// Zero-allocation shallow directory probe that verifies all root entry offsets land in-bounds without allocating nodes or strings.
+    /// </summary>
+    private static bool ProbeDirectoryOffsetsInBounds(
+        ReadOnlySpan<byte> data,
+        uint fstart,
+        uint versionHash,
+        out bool isEmpty) {
+        isEmpty = false;
+        try {
+            var r = new WzReader(data, fstart, versionHash);
+            r.Seek(checked((int) fstart + 2));
+
+            int count = r.ReadCompressedInt32();
+            if (count is < 0 or > 100_000) {
+                return false;
+            }
+            if (count == 0) {
+                isEmpty = true;
+                return true;
+            }
+
+            for (int i = 0; i < count; i++) {
+                byte tag = r.ReadByte();
+                switch (tag) {
+                    case 1:
+                        r.Take(10);
+                        continue;
+                    case 2: {
+                        int rel = r.ReadInt32();
+                        long atLong = (long) fstart + 1L + rel;
+                        if (atLong < 1 || atLong >= data.Length) {
+                            return false;
+                        }
+                        var nr = new WzReader(data, fstart, versionHash);
+                        nr.Seek((int) atLong);
+                        nr.SkipString();
+                        break;
+                    }
+                    case 3 or 4:
+                        r.SkipString();
+                        break;
+                    default:
+                        return false;
+                }
+
+                r.ReadCompressedInt32(); // size
+                r.ReadCompressedInt32(); // checksum
+                uint offset = r.DecryptOffset();
+                if (offset >= (uint) data.Length) {
+                    return false;
+                }
+            }
+
+            return true;
+        } catch (WzException) {
+            return false;
+        }
+    }
+
+    private static (string Name, WzNodeKind Kind)? ReadEntryHeader(ref WzReader r, ReadOnlySpan<byte> data) {
         int start = r.Position;
         byte tag = r.ReadByte();
         switch (tag) {
@@ -397,7 +472,7 @@ public class WzArchive : IDisposable {
         }
     }
 
-    private static List<WzNode> ReadEntries(WzReader r, byte[] data) {
+    private static List<WzNode> ReadEntries(ref WzReader r, ReadOnlySpan<byte> data) {
         int count = r.ReadCompressedInt32();
         if (count is < 0 or > 100_000) {
             throw WzException.BadEntryType(0, r.Position);
@@ -405,7 +480,7 @@ public class WzArchive : IDisposable {
 
         var output = new List<WzNode>(count);
         for (int i = 0; i < count; i++) {
-            (string Name, WzNodeKind Kind)? header = ReadEntryHeader(r, data);
+            (string Name, WzNodeKind Kind)? header = ReadEntryHeader(ref r, data);
             if (header is null) {
                 continue;
             }
@@ -417,16 +492,14 @@ public class WzArchive : IDisposable {
         return output;
     }
 
-    private static List<WzNode> ReadDirectoryShallow(WzReader r, byte[] data) => ReadEntries(r, data);
-
-    private static List<WzNode> ReadDirectory(WzReader r, byte[] data) {
-        List<WzNode> nodes = ReadEntries(r, data);
+    private static List<WzNode> ReadDirectory(ref WzReader r, ReadOnlySpan<byte> data) {
+        List<WzNode> nodes = ReadEntries(ref r, data);
         foreach (WzNode n in nodes) {
             if (n.Kind == WzNodeKind.Directory && n.Offset < (uint) data.Length) {
                 var sub = new WzReader(data, r.FStart, r.VersionHash);
                 sub.Seek((int) n.Offset);
                 try {
-                    n.MutableChildren.AddRange(ReadDirectory(sub, data));
+                    n.MutableChildren.AddRange(ReadDirectory(ref sub, data));
                 } catch (WzException) {
                     n.MutableChildren.Clear();
                 }
