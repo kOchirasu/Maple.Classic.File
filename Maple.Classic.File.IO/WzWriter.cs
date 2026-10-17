@@ -59,6 +59,13 @@ internal class WzWriter(int capacity = 256) {
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteZeroBytes(int count) {
+        if (count > 0) {
+            AllocateSpan(count).Clear();
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void WriteUInt16(ushort v) => BinaryPrimitives.WriteUInt16LittleEndian(AllocateSpan(2), v);
 
     public void U16(ushort v) => WriteUInt16(v);
@@ -201,6 +208,12 @@ internal class WzWriter(int capacity = 256) {
     public static byte[] WriteArchive(ushort version, IReadOnlyList<WzImageEntry> images) {
         ArgumentNullException.ThrowIfNull(images);
 
+        for (int i = 0; i < images.Count; i++) {
+            if (images[i].Name.Contains('/')) {
+                return WriteHierarchicalArchive(version, images);
+            }
+        }
+
         uint vh = WzCrypto.VersionHash(version);
         byte[] copyrightBytes = Encoding.UTF8.GetBytes(WzCrypto.Copyright);
         uint fstart = (uint) (4 + 8 + 4 + copyrightBytes.Length + 1); // 0x3C
@@ -210,7 +223,6 @@ internal class WzWriter(int capacity = 256) {
         dir.CompressedI32(images.Count);
 
         var offsetFields = new int[images.Count];
-        int totalPayloadSize = 0;
         for (int i = 0; i < images.Count; i++) {
             WzImageEntry img = images[i];
             ReadOnlySpan<byte> imgSpan = img.Bytes.Span;
@@ -219,7 +231,6 @@ internal class WzWriter(int capacity = 256) {
             dir.CompressedI32(imgSpan.Length);
             dir.CompressedI32(WzCrypto.Checksum(imgSpan));
             offsetFields[i] = dir.ReserveU32();
-            totalPayloadSize += imgSpan.Length;
         }
 
         int pos = (int) fstart + dir.Length;
@@ -252,16 +263,137 @@ internal class WzWriter(int capacity = 256) {
         return output;
     }
 
+    private sealed class DirBuilderNode(string name) {
+        public string Name { get; } = name;
+        public List<DirBuilderNode> SubDirs { get; } = [];
+        public List<int> ImageIndices { get; } = [];
+        public int OffsetFieldPos { get; set; }
+        public int TableStartPos { get; set; }
+    }
+
+    private static byte[] WriteHierarchicalArchive(ushort version, IReadOnlyList<WzImageEntry> images) {
+        uint vh = WzCrypto.VersionHash(version);
+        byte[] copyrightBytes = Encoding.UTF8.GetBytes(WzCrypto.Copyright);
+        uint fstart = (uint) (4 + 8 + 4 + copyrightBytes.Length + 1); // 0x3C
+
+        var rootDir = new DirBuilderNode("");
+        for (int i = 0; i < images.Count; i++) {
+            string path = images[i].Name.Trim('/');
+            if (string.IsNullOrEmpty(path)) {
+                continue;
+            }
+            string[] parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            DirBuilderNode cur = rootDir;
+            for (int p = 0; p < parts.Length - 1; p++) {
+                string dirName = parts[p];
+                DirBuilderNode? next = cur.SubDirs.Find(d => d.Name == dirName);
+                if (next is null) {
+                    next = new DirBuilderNode(dirName);
+                    cur.SubDirs.Add(next);
+                }
+                cur = next;
+            }
+            cur.ImageIndices.Add(i);
+        }
+
+        var dir = new WzWriter(images.Count * 32 + 32);
+        dir.U16(WzCrypto.EncVersion(version));
+
+        var imgOffsetFields = new int[images.Count];
+        WriteDirTableRecursive(dir, rootDir, images, imgOffsetFields);
+
+        PatchDirOffsetsRecursive(dir, rootDir, fstart, vh);
+
+        int pos = (int) fstart + dir.Length;
+        for (int i = 0; i < images.Count; i++) {
+            uint fieldPos = (uint) ((int) fstart + imgOffsetFields[i]);
+            uint enc = WzCrypto.EncryptOffset(fieldPos, fstart, vh, (uint) pos);
+            dir.PatchU32(imgOffsetFields[i], enc);
+            pos += images[i].Bytes.Length;
+        }
+
+        var output = new byte[pos];
+        Span<byte> outSpan = output;
+
+        WzCrypto.Magic.CopyTo(outSpan[..4]);
+        BinaryPrimitives.WriteUInt64LittleEndian(outSpan.Slice(4, 8), (ulong) pos - fstart);
+        BinaryPrimitives.WriteUInt32LittleEndian(outSpan.Slice(12, 4), fstart);
+        copyrightBytes.CopyTo(outSpan.Slice(16, copyrightBytes.Length));
+        outSpan[16 + copyrightBytes.Length] = 0;
+
+        int cursor = (int) fstart;
+        dir.AsSpan().CopyTo(outSpan.Slice(cursor, dir.Length));
+        cursor += dir.Length;
+
+        for (int i = 0; i < images.Count; i++) {
+            ReadOnlySpan<byte> imgSpan = images[i].Bytes.Span;
+            imgSpan.CopyTo(outSpan.Slice(cursor, imgSpan.Length));
+            cursor += imgSpan.Length;
+        }
+
+        return output;
+
+        static void WriteDirTableRecursive(
+            WzWriter w,
+            DirBuilderNode node,
+            IReadOnlyList<WzImageEntry> imgs,
+            int[] imgFields) {
+            node.TableStartPos = w.Length;
+            int totalEntries = node.SubDirs.Count + node.ImageIndices.Count;
+            w.CompressedI32(totalEntries);
+
+            foreach (DirBuilderNode sub in node.SubDirs) {
+                w.U8(3);
+                w.String(sub.Name);
+                w.CompressedI32(0);
+                w.CompressedI32(0);
+                sub.OffsetFieldPos = w.ReserveU32();
+            }
+
+            foreach (int idx in node.ImageIndices) {
+                WzImageEntry img = imgs[idx];
+                int lastSlash = img.Name.LastIndexOf('/');
+                string leafName = lastSlash >= 0 ? img.Name[(lastSlash + 1)..] : img.Name;
+                ReadOnlySpan<byte> imgSpan = img.Bytes.Span;
+                w.U8(4);
+                w.String(leafName);
+                w.CompressedI32(imgSpan.Length);
+                w.CompressedI32(WzCrypto.Checksum(imgSpan));
+                imgFields[idx] = w.ReserveU32();
+            }
+
+            foreach (DirBuilderNode sub in node.SubDirs) {
+                WriteDirTableRecursive(w, sub, imgs, imgFields);
+            }
+        }
+
+        static void PatchDirOffsetsRecursive(WzWriter w, DirBuilderNode node, uint fstart, uint vh) {
+            foreach (DirBuilderNode sub in node.SubDirs) {
+                uint fieldPos = (uint) ((int) fstart + sub.OffsetFieldPos);
+                uint targetPos = (uint) ((int) fstart + sub.TableStartPos);
+                uint enc = WzCrypto.EncryptOffset(fieldPos, fstart, vh, targetPos);
+                w.PatchU32(sub.OffsetFieldPos, enc);
+                PatchDirOffsetsRecursive(w, sub, fstart, vh);
+            }
+        }
+    }
+
     public static List<WzImageEntry> ArchiveImages(WzArchive archive) {
         ArgumentNullException.ThrowIfNull(archive);
         var output = new List<WzImageEntry>(archive.Root.Children.Count);
-        foreach (WzNode node in archive.Root.Children) {
-            if (node.IsDir) {
-                throw WzException.BadEntryType(3, (int) node.Offset);
-            }
-            output.Add(new WzImageEntry(node.Name, archive.GetImageMemory(node)));
-        }
+        CollectImages(archive, archive.Root, "", output);
         return output;
+
+        static void CollectImages(WzArchive archive, WzNode parent, string prefix, List<WzImageEntry> acc) {
+            foreach (WzNode node in parent.Children) {
+                string fullPath = string.IsNullOrEmpty(prefix) ? node.Name : $"{prefix}/{node.Name}";
+                if (node.IsDir) {
+                    CollectImages(archive, node, fullPath, acc);
+                } else {
+                    acc.Add(new WzImageEntry(fullPath, archive.GetImageMemory(node)));
+                }
+            }
+        }
     }
 
     public static List<WzImageEntry> MergeImages(
@@ -297,6 +429,19 @@ internal class WzWriter(int capacity = 256) {
 
     public static void VerifyArchive(ReadOnlySpan<byte> bytes, ushort version, IReadOnlyList<WzImageEntry> images) {
         ArgumentNullException.ThrowIfNull(images);
+
+        for (int i = 0; i < images.Count; i++) {
+            if (images[i].Name.Contains('/')) {
+                using WzArchive ar = WzArchive.FromBytes(bytes.ToArray(), "Verify", version);
+                foreach (WzImageEntry img in images) {
+                    WzNode? node = ar[img.Name];
+                    if (node is null || !node.IsImage || !ar.GetImageSpan(node).SequenceEqual(img.Bytes.Span)) {
+                        throw WzException.OutOfBounds(img.Name, 0, img.Bytes.Length, bytes.Length);
+                    }
+                }
+                return;
+            }
+        }
 
         WzHeader header = WzArchive.ParseHeader(bytes);
         if (header.EncVer != WzCrypto.EncVersion(version)) {

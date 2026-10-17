@@ -127,7 +127,21 @@ internal static class WzImage {
                 r.ReadByte();
                 int dataLen = Math.Max(0, r.ReadCompressedInt32());
                 int duration = r.ReadCompressedInt32();
-                return new WzValue.Sound(dataLen, duration);
+                int safeEnd = Math.Min(end, data.Length);
+                int rem = Math.Max(0, safeEnd - r.Position);
+                ReadOnlyMemory<byte> header = ReadOnlyMemory<byte>.Empty;
+                ReadOnlyMemory<byte> payload = ReadOnlyMemory<byte>.Empty;
+                if (rem >= dataLen && dataLen > 0) {
+                    int headerLen = rem - dataLen;
+                    if (headerLen > 0) {
+                        header = data.Slice(r.Position, headerLen);
+                    }
+                    payload = data.Slice(r.Position + headerLen, dataLen);
+                } else if (rem > 0) {
+                    payload = data.Slice(r.Position, rem);
+                }
+                r.Seek(Math.Min(end, r.Data.Length));
+                return new WzValue.Sound(dataLen, duration, payload, header);
             }
 
             case "UOL": {
@@ -136,9 +150,11 @@ internal static class WzImage {
             }
 
             case "RawData": {
-                int dataLen = Math.Max(0, end - r.Position);
+                int safeEnd = Math.Min(end, data.Length);
+                int dataLen = Math.Max(0, safeEnd - r.Position);
+                ReadOnlyMemory<byte> payload = dataLen > 0 ? data.Slice(r.Position, dataLen) : ReadOnlyMemory<byte>.Empty;
                 r.Seek(Math.Min(end, r.Data.Length));
-                return new WzValue.RawData(dataLen);
+                return new WzValue.RawData(dataLen) { Payload = payload };
             }
 
             default:
@@ -258,11 +274,35 @@ internal static class WzImage {
                 w.ImageString(s);
                 break;
 
-            case WzValue.Sound:
-                throw WzException.BadExtendedType("Sound_DX8", 0);
+            case WzValue.Sound s: {
+                ReadOnlySpan<byte> headerSpan = s.Header.Span;
+                ReadOnlySpan<byte> payloadSpan = s.Payload.Span;
+                int actualDataLen = !payloadSpan.IsEmpty ? payloadSpan.Length : Math.Max(0, s.DataLength);
+                w.TypeString("Sound_DX8");
+                w.U8(0);
+                w.CompressedI32(actualDataLen);
+                w.CompressedI32(s.Duration);
+                if (!headerSpan.IsEmpty) {
+                    w.WriteBytes(headerSpan);
+                }
+                if (!payloadSpan.IsEmpty) {
+                    w.WriteBytes(payloadSpan);
+                } else if (actualDataLen > 0) {
+                    w.WriteZeroBytes(actualDataLen);
+                }
+                break;
+            }
 
-            case WzValue.RawData:
-                throw WzException.BadExtendedType("RawData", 0);
+            case WzValue.RawData raw: {
+                ReadOnlySpan<byte> payloadSpan = raw.Payload.Span;
+                w.TypeString("RawData");
+                if (!payloadSpan.IsEmpty) {
+                    w.WriteBytes(payloadSpan);
+                } else if (raw.DataLength > 0) {
+                    w.WriteZeroBytes(Math.Max(0, raw.DataLength));
+                }
+                break;
+            }
 
             default:
                 WriteValue(w, v);

@@ -104,9 +104,29 @@ public abstract record WzValue : IEnumerable<WzProperty> {
     }
 
     /// <summary>
-    /// <c>Sound_DX8</c>
+    /// <c>Sound_DX8</c> — audio duration, payload slice, and optional DirectSound wave header.
     /// </summary>
-    public sealed record Sound(int DataLength, int Duration) : WzValue;
+    public sealed record Sound(int DataLength, int Duration) : WzValue {
+        public ReadOnlyMemory<byte> Payload { get; set; } = ReadOnlyMemory<byte>.Empty;
+        public ReadOnlyMemory<byte> Header { get; set; } = ReadOnlyMemory<byte>.Empty;
+
+        public Sound(int dataLength, int duration, ReadOnlyMemory<byte> payload, ReadOnlyMemory<byte> header = default)
+            : this(dataLength, duration) {
+            Payload = payload;
+            Header = header;
+        }
+
+        public bool Equals(Sound? other) {
+            if (ReferenceEquals(this, other)) return true;
+            if (other is null) return false;
+            if (DataLength != other.DataLength || Duration != other.Duration) return false;
+            if (!Payload.IsEmpty && !other.Payload.IsEmpty && !Payload.Span.SequenceEqual(other.Payload.Span)) return false;
+            if (!Header.IsEmpty && !other.Header.IsEmpty && !Header.Span.SequenceEqual(other.Header.Span)) return false;
+            return true;
+        }
+
+        public override int GetHashCode() => HashCode.Combine(DataLength, Duration);
+    }
 
     /// <summary>
     /// <c>Shape2D#Convex2D</c>
@@ -132,7 +152,23 @@ public abstract record WzValue : IEnumerable<WzProperty> {
     /// <summary>
     /// <c>RawData</c> — opaque length-delimited blob (embedded fonts, colour LUTs).
     /// </summary>
-    public sealed record RawData(int DataLength) : WzValue;
+    public sealed record RawData(int DataLength) : WzValue {
+        public ReadOnlyMemory<byte> Payload { get; set; } = ReadOnlyMemory<byte>.Empty;
+
+        public RawData(ReadOnlyMemory<byte> payload) : this(payload.Length) {
+            Payload = payload;
+        }
+
+        public bool Equals(RawData? other) {
+            if (ReferenceEquals(this, other)) return true;
+            if (other is null) return false;
+            if (DataLength != other.DataLength) return false;
+            if (!Payload.IsEmpty && !other.Payload.IsEmpty && !Payload.Span.SequenceEqual(other.Payload.Span)) return false;
+            return true;
+        }
+
+        public override int GetHashCode() => DataLength.GetHashCode();
+    }
 
     // -------------------------------------------------------------------------
     // Implicit & Explicit Conversions (Minimal Boilerplate)

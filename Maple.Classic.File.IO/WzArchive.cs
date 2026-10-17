@@ -6,7 +6,7 @@ using Maple.Classic.File.IO.Crypto;
 namespace Maple.Classic.File.IO;
 
 public record WzHeader(ulong FSize, uint FStart, string Copyright) {
-    internal ushort EncVer { get; init; }
+    public ushort EncVer { get; init; }
 }
 
 public enum WzNodeKind {

@@ -120,6 +120,12 @@ public class WzImageTests {
         Assert.Contains("\"vecProp\": { \"x\": -15, \"y\": 30 }", json);
         Assert.Contains("\"soundProp\": { \"_sound\": true, \"bytes\": 64, \"duration\": 1500 }", json);
         Assert.Contains("\"rawProp\": { \"_rawdata\": true, \"bytes\": 5 }", json);
+
+        // Verify full binary round-trip including Sound_DX8 and RawData payloads
+        byte[] reserialized = root.ToBytes();
+        WzValue reparsed = WzValue.Parse(reserialized);
+        Assert.Equal(root, reparsed);
+        Assert.Equal([1, 2, 3, 4, 5], Assert.IsType<WzValue.RawData>(reparsed["rawProp"]).Payload.ToArray());
     }
 
     private static void WriteExtendedProp(WzWriter w, string name, Action<WzWriter> writeBody) {

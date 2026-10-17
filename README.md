@@ -4,7 +4,7 @@ MapleStory Classic World (`mscw`) WZ archive and `.img` property parser, reader,
 
 ## Projects
 
-- **`Maple.Classic.File.IO`**: Public API (`WzArchive`, `WzNode`, `WzValue`, `WzProperty`, `WzHeader`, `WzException`) with internal binary/crypto implementation details (`WzCrypto`, `WzReader`, `WzWriter`, `WzImage`).
+- **`Maple.Classic.File.IO`**: Public API (`WzArchive`, `WzNode`, `WzValue`, `WzProperty`, `WzHeader`, `WzException`) with internal binary/crypto implementation details (`WzCrypto`, `WzReader`, `WzWriter`, `WzImage`). Supports both flat and hierarchical directory trees (`Coat/01040000.img`), zero-copy `Canvas` payloads, and lossless `Sound_DX8` / `RawData` binary round-tripping.
 - **`Maple.Classic.File.Tests`**: Unit tests for string decoding, version hashing, offset encryption/decryption, directory traversal, property deserialization, and round-trip archive/image serialization.
 
 ## Usage Examples
