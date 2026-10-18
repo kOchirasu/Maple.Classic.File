@@ -1,7 +1,8 @@
 using System.Globalization;
 using System.Text;
+using Maple.Classic.File.IO.Values;
 
-namespace Maple.Classic.File.IO;
+namespace Maple.Classic.File.IO.Serialization;
 
 /// <summary>
 /// Internal image (<c>.img</c>) property deserialization, single-pass binary serialization, and single-pass JSON rendering.
@@ -154,7 +155,7 @@ internal static class WzImage {
                 int dataLen = Math.Max(0, safeEnd - r.Position);
                 ReadOnlyMemory<byte> payload = dataLen > 0 ? data.Slice(r.Position, dataLen) : ReadOnlyMemory<byte>.Empty;
                 r.Seek(Math.Min(end, r.Data.Length));
-                return new WzValue.RawData(dataLen) { Payload = payload };
+                return new WzValue.RawData(dataLen, payload);
             }
 
             default:
@@ -346,11 +347,11 @@ internal static class WzImage {
             case WzValue.Vector(var x, var y):
                 sb.Append("{ \"x\": ").Append(x).Append(", \"y\": ").Append(y).Append(" }");
                 break;
-            case WzValue.Sound(var dataLen, var duration):
+            case WzValue.Sound(var dataLen, var duration, _, _):
                 sb.Append("{ \"_sound\": true, \"bytes\": ").Append(dataLen)
                   .Append(", \"duration\": ").Append(duration).Append(" }");
                 break;
-            case WzValue.RawData(var dataLen):
+            case WzValue.RawData(var dataLen, _):
                 sb.Append("{ \"_rawdata\": true, \"bytes\": ").Append(dataLen).Append(" }");
                 break;
             case WzValue.Convex(var items): {

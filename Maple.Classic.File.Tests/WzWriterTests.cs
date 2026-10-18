@@ -1,6 +1,9 @@
 using System.Buffers.Binary;
 using Maple.Classic.File.IO;
+using Maple.Classic.File.IO.Archive;
 using Maple.Classic.File.IO.Crypto;
+using Maple.Classic.File.IO.Serialization;
+using Maple.Classic.File.IO.Values;
 using Xunit;
 
 namespace Maple.Classic.File.Tests;
@@ -77,11 +80,11 @@ public class WzWriterTests {
     [Fact]
     public void OutlinkedStubs_AreInlinedAndDanglingLinkFails() {
         static WzValue.Canvas Stub(string link) => new(
-            width: 1,
-            height: 1,
-            format: WzCanvasFormat.Bgra4444,
-            payload: new byte[10],
-            properties: [
+            Width: 1,
+            Height: 1,
+            Format: WzCanvasFormat.Bgra4444,
+            Payload: new byte[10],
+            Properties: [
                 new WzProperty("origin", (-35, 11)),
                 new WzProperty("_outlink", link),
             ]);

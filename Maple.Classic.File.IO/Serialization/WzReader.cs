@@ -2,7 +2,7 @@ using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 using Maple.Classic.File.IO.Crypto;
 
-namespace Maple.Classic.File.IO;
+namespace Maple.Classic.File.IO.Serialization;
 
 /// <summary>
 /// Internal zero-allocation stack cursor over a WZ archive or image span.

@@ -2,9 +2,10 @@ using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Text;
+using Maple.Classic.File.IO.Archive;
 using Maple.Classic.File.IO.Crypto;
 
-namespace Maple.Classic.File.IO;
+namespace Maple.Classic.File.IO.Serialization;
 
 internal sealed record WzImageEntry(string Name, ReadOnlyMemory<byte> Bytes);
 

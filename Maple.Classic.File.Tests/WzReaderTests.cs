@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using Maple.Classic.File.IO;
 using Maple.Classic.File.IO.Crypto;
+using Maple.Classic.File.IO.Serialization;
 using Xunit;
 
 namespace Maple.Classic.File.Tests;

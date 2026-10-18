@@ -1,6 +1,9 @@
 using System.Text;
 using Maple.Classic.File.IO;
+using Maple.Classic.File.IO.Archive;
 using Maple.Classic.File.IO.Crypto;
+using Maple.Classic.File.IO.Serialization;
+using Maple.Classic.File.IO.Values;
 using Xunit;
 
 namespace Maple.Classic.File.Tests;
@@ -16,12 +19,12 @@ public class WzArchiveTests {
     [Fact]
     public void EmptyStubArchive_DetectsClientVersion779() {
         // 63-byte stub archive with entry count = 0 (like String/String.wz).
-        byte[] archiveBytes = WzWriter.WriteArchive(WzCrypto.ClientVersion, []);
+        byte[] archiveBytes = WzWriter.WriteArchive(WzCrypto.CLIENT_VERSION, []);
         Assert.Equal(63, archiveBytes.Length);
 
         using WzArchive ar = WzArchive.FromBytes(archiveBytes, "String");
-        Assert.Equal(WzArchive.DefaultVersion, ar.Version);
-        Assert.Equal(WzCrypto.ClientVersionHash, ar.VersionHash);
+        Assert.Equal(WzArchive.DEFAULT_VERSION, ar.Version);
+        Assert.Equal(WzCrypto.CLIENT_VERSION_HASH, ar.VersionHash);
         Assert.Equal((ushort) 34, ar.Header.EncVer);
         Assert.Equal(0x3Cu, ar.Header.FStart);
         Assert.Empty(ar.Nodes);
@@ -43,7 +46,7 @@ public class WzArchiveTests {
         writer.WriteBytes(WzCrypto.Magic);
         writer.U64(0); // placeholder fsize
         writer.U32(fstart);
-        writer.WriteBytes(Encoding.UTF8.GetBytes(WzCrypto.Copyright));
+        writer.WriteBytes(Encoding.UTF8.GetBytes(WzCrypto.COPYRIGHT));
         writer.U8(0);
         Assert.Equal((int) fstart, writer.Length);
 
@@ -142,16 +145,16 @@ public class WzArchiveTests {
     [Fact]
     public void DirectoryOnlyIndexArchive_DetectsClientVersion779() {
         const uint fstart = 0x3C;
-        uint vh = WzCrypto.VersionHash(WzCrypto.ClientVersion);
+        uint vh = WzCrypto.VersionHash(WzCrypto.CLIENT_VERSION);
         string[] dirs = ["Cash", "Consume", "Etc", "Install", "Pet", "Special"];
 
         var writer = new WzWriter();
         writer.WriteBytes(WzCrypto.Magic);
         writer.U64(0);
         writer.U32(fstart);
-        writer.WriteBytes(Encoding.UTF8.GetBytes(WzCrypto.Copyright));
+        writer.WriteBytes(Encoding.UTF8.GetBytes(WzCrypto.COPYRIGHT));
         writer.U8(0);
-        writer.U16(WzCrypto.EncVersion(WzCrypto.ClientVersion));
+        writer.U16(WzCrypto.EncVersion(WzCrypto.CLIENT_VERSION));
         writer.CompressedI32(dirs.Length);
 
         var offsetFields = new int[dirs.Length];
@@ -176,7 +179,7 @@ public class WzArchiveTests {
         }
 
         using WzArchive ar = WzArchive.FromBytes(writer.ToArray(), "Item");
-        Assert.Equal(WzCrypto.ClientVersion, ar.Version);
+        Assert.Equal(WzCrypto.CLIENT_VERSION, ar.Version);
         Assert.Equal(6, ar.Nodes.Count);
         Assert.All(ar.Nodes, n => Assert.True(n.IsDir));
     }

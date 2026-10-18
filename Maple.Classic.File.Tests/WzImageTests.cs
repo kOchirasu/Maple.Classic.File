@@ -1,4 +1,5 @@
-using Maple.Classic.File.IO;
+using Maple.Classic.File.IO.Serialization;
+using Maple.Classic.File.IO.Values;
 using Xunit;
 
 namespace Maple.Classic.File.Tests;

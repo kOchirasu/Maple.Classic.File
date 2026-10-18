@@ -4,14 +4,19 @@ MapleStory Classic World (`mscw`) WZ archive and `.img` property parser, reader,
 
 ## Projects
 
-- **`Maple.Classic.File.IO`**: Public API (`WzArchive`, `WzNode`, `WzValue`, `WzProperty`, `WzHeader`, `WzException`) with internal binary/crypto implementation details (`WzCrypto`, `WzReader`, `WzWriter`, `WzImage`). Supports both flat and hierarchical directory trees (`Coat/01040000.img`), zero-copy `Canvas` payloads, and lossless `Sound_DX8` / `RawData` binary round-tripping.
+- **`Maple.Classic.File.IO`**:
+  - **`Archive/`** (`Maple.Classic.File.IO.Archive`): `WzArchive`, `WzNode`, `WzHeader`
+  - **`Values/`** (`Maple.Classic.File.IO.Values`): `WzProperty`, `WzCanvasFormat`, and partial `WzValue` hierarchy (`WzValue.cs`, `WzValue.Object.cs`, `WzValue.Canvas.cs`, `WzValue.Sound.cs`, `WzValue.Convex.cs`, `WzValue.RawData.cs`)
+  - **`Serialization/`** (`Maple.Classic.File.IO.Serialization`): Internal binary/JSON serialization (`WzReader`, `WzWriter`, `WzImage`)
+  - **`Crypto/`** (`Maple.Classic.File.IO.Crypto`): `WzCrypto` version hashing, offset encryption/decryption, and checksums
+  - **`WzException.cs`** (`Maple.Classic.File.IO`): `WzException` and `WzErrorKind`
 - **`Maple.Classic.File.Tests`**: Unit tests for string decoding, version hashing, offset encryption/decryption, directory traversal, property deserialization, and round-trip archive/image serialization.
 
 ## Usage Examples
 
 ### Opening a WZ Archive & Listing Nodes
 ```csharp
-using Maple.Classic.File.IO;
+using Maple.Classic.File.IO.Archive;
 
 using var archive = new WzArchive("Data/String/String_000.wz");
 foreach (WzNode node in archive.Nodes) {
@@ -21,7 +26,8 @@ foreach (WzNode node in archive.Nodes) {
 
 ### Parsing an `.img` Property Tree
 ```csharp
-using Maple.Classic.File.IO;
+using Maple.Classic.File.IO.Archive;
+using Maple.Classic.File.IO.Values;
 
 using var archive = new WzArchive("Data/String/String_000.wz");
 WzValue eqp = archive.ParseImage("Eqp.img");
@@ -35,7 +41,8 @@ Console.WriteLine(eqp.ToJson());
 
 ### Editing Images & Saving an Archive
 ```csharp
-using Maple.Classic.File.IO;
+using Maple.Classic.File.IO.Archive;
+using Maple.Classic.File.IO.Values;
 
 using var archive = new WzArchive("Data/String/String_000.wz");
 WzValue eqp = archive.ParseImage("Eqp.img");
