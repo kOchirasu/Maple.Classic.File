@@ -6,14 +6,14 @@ namespace Maple.Classic.File.IO.Crypto;
 /// Internal version hashing, offset encryption/decryption, and checksum utilities for WZ archives.
 /// </summary>
 internal static class WzCrypto {
-    public const ushort ClientVersion = 779;
-    public const uint ClientVersionHash = 0x0000_E73Au;
-    public const ushort ClientEncVer = 34;
-    public const uint OffsetMagic = 0x581C_3F6Du;
-    public const byte AsciiMask = 0xAA;
-    public const ushort UnicodeMask = 0xAAAA;
-    public const string Copyright = "Package file v1.0 Copyright 2002 Wizet, ZMS";
-    public const uint DefaultFStart = 0x3Cu;
+    public const ushort CLIENT_VERSION = 779;
+    public const uint CLIENT_VERSION_HASH = 0x0000_E73Au;
+    public const ushort CLIENT_ENC_VER = 34;
+    public const uint OFFSET_MAGIC = 0x581C_3F6Du;
+    public const byte ASCII_MASK = 0xAA;
+    public const ushort UNICODE_MASK = 0xAAAA;
+    public const string COPYRIGHT = "Package file v1.0 Copyright 2002 Wizet, ZMS";
+    public const uint DEFAULT_F_START = 0x3Cu;
 
     public static ReadOnlySpan<byte> Magic => "PKG1"u8;
 
@@ -41,7 +41,7 @@ internal static class WzCrypto {
     public static uint DecryptOffset(uint fieldPos, uint fstart, uint versionHash, uint encrypted) {
         uint o = unchecked(fieldPos - fstart) ^ uint.MaxValue;
         o = unchecked(o * versionHash);
-        o = unchecked(o - OffsetMagic);
+        o = unchecked(o - OFFSET_MAGIC);
         o = uint.RotateLeft(o, (int) (o & 0x1Fu));
         o ^= encrypted;
         o = unchecked(o + unchecked(fstart * 2u));
@@ -51,7 +51,7 @@ internal static class WzCrypto {
     public static uint EncryptOffset(uint fieldPos, uint fstart, uint versionHash, uint real) {
         uint o = unchecked(fieldPos - fstart) ^ uint.MaxValue;
         o = unchecked(o * versionHash);
-        o = unchecked(o - OffsetMagic);
+        o = unchecked(o - OFFSET_MAGIC);
         o = uint.RotateLeft(o, (int) (o & 0x1Fu));
         return o ^ unchecked(real - unchecked(fstart * 2u));
     }

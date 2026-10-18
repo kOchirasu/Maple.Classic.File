@@ -169,7 +169,7 @@ internal class WzWriter(int capacity = 256) {
 
             Span<byte> payload = AllocateSpan(n);
             for (int k = 0; k < n; k++) {
-                payload[k] = (byte) ((byte) s[k] ^ unchecked((byte) (WzCrypto.AsciiMask + (byte) k)));
+                payload[k] = (byte) ((byte) s[k] ^ unchecked((byte) (WzCrypto.ASCII_MASK + (byte) k)));
             }
         } else {
             int n = s.Length;
@@ -183,7 +183,7 @@ internal class WzWriter(int capacity = 256) {
 
             Span<byte> payload = AllocateSpan(n * 2);
             for (int k = 0; k < n; k++) {
-                ushort u = (ushort) (s[k] ^ unchecked((ushort) (WzCrypto.UnicodeMask + (ushort) k)));
+                ushort u = (ushort) (s[k] ^ unchecked((ushort) (WzCrypto.UNICODE_MASK + (ushort) k)));
                 BinaryPrimitives.WriteUInt16LittleEndian(payload.Slice(k * 2, 2), u);
             }
         }
@@ -215,7 +215,7 @@ internal class WzWriter(int capacity = 256) {
         }
 
         uint vh = WzCrypto.VersionHash(version);
-        byte[] copyrightBytes = Encoding.UTF8.GetBytes(WzCrypto.Copyright);
+        byte[] copyrightBytes = Encoding.UTF8.GetBytes(WzCrypto.COPYRIGHT);
         uint fstart = (uint) (4 + 8 + 4 + copyrightBytes.Length + 1); // 0x3C
 
         var dir = new WzWriter(images.Count * 24 + 16);
@@ -273,7 +273,7 @@ internal class WzWriter(int capacity = 256) {
 
     private static byte[] WriteHierarchicalArchive(ushort version, IReadOnlyList<WzImageEntry> images) {
         uint vh = WzCrypto.VersionHash(version);
-        byte[] copyrightBytes = Encoding.UTF8.GetBytes(WzCrypto.Copyright);
+        byte[] copyrightBytes = Encoding.UTF8.GetBytes(WzCrypto.COPYRIGHT);
         uint fstart = (uint) (4 + 8 + 4 + copyrightBytes.Length + 1); // 0x3C
 
         var rootDir = new DirBuilderNode("");
@@ -471,7 +471,7 @@ internal class WzWriter(int capacity = 256) {
                 throw WzException.OutOfBounds(name, off, size, bytes.Length);
             }
 
-            if ((long) off + size > bytes.Length || !bytes.Slice((int) off, size).SequenceEqual(expectedSpan)) {
+            if (off + size > bytes.Length || !bytes.Slice((int) off, size).SequenceEqual(expectedSpan)) {
                 throw WzException.OutOfBounds(name, off, size, bytes.Length);
             }
         }

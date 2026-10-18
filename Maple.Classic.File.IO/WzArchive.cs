@@ -131,7 +131,7 @@ public class WzNode : IEnumerable<WzNode> {
 /// Represents a WZ archive for reading, navigating, editing, and saving <c>.wz</c> files.
 /// </summary>
 public class WzArchive : IDisposable {
-    public const ushort DefaultVersion = WzCrypto.ClientVersion;
+    public const ushort DEFAULT_VERSION = WzCrypto.CLIENT_VERSION;
 
     private readonly List<WzImageEntry> stagedAdditions = [];
     private readonly HashSet<string> stagedRemovals = new(StringComparer.Ordinal);
@@ -167,7 +167,7 @@ public class WzArchive : IDisposable {
     /// <summary>
     /// Creates an empty in-memory WZ archive ready for adding images via <see cref="SetImage(string, WzValue)"/> and saving.
     /// </summary>
-    public WzArchive(ushort version = DefaultVersion)
+    public WzArchive(ushort version = DEFAULT_VERSION)
         : this(WzWriter.WriteArchive(version, []), "Archive", version, "") {
     }
 
@@ -340,7 +340,7 @@ public class WzArchive : IDisposable {
         string copyright = Encoding.UTF8.GetString(data[16..end]);
 
         if (fstart > (uint) data.Length || (long) fstart + 2 > data.Length) {
-            int fs = (int) Math.Min(fstart, (uint) int.MaxValue);
+            int fs = (int) Math.Min(fstart, int.MaxValue);
             int have = Math.Max(0, data.Length - fs);
             throw WzException.UnexpectedEof(fs, 2, have);
         }
@@ -353,9 +353,9 @@ public class WzArchive : IDisposable {
         ArgumentNullException.ThrowIfNull(header);
 
         // Fast-path: check the known client version (779) first before scanning all u16 candidates.
-        if (WzCrypto.EncVersion(WzCrypto.ClientVersion) == header.EncVer
-            && ProbeDirectoryOffsetsInBounds(data, header.FStart, WzCrypto.ClientVersionHash, out bool isEmpty)) {
-            return WzCrypto.ClientVersion;
+        if (WzCrypto.EncVersion(WzCrypto.CLIENT_VERSION) == header.EncVer
+            && ProbeDirectoryOffsetsInBounds(data, header.FStart, WzCrypto.CLIENT_VERSION_HASH, out bool isEmpty)) {
+            return WzCrypto.CLIENT_VERSION;
         }
 
         ushort? firstMatch = null;
@@ -367,12 +367,12 @@ public class WzArchive : IDisposable {
             firstMatch ??= candidate;
 
             if (ProbeDirectoryOffsetsInBounds(data, header.FStart, WzCrypto.VersionHash(candidate), out isEmpty)) {
-                return isEmpty ? WzCrypto.ClientVersion : candidate;
+                return isEmpty ? WzCrypto.CLIENT_VERSION : candidate;
             }
         }
 
-        if (WzCrypto.EncVersion(WzCrypto.ClientVersion) == header.EncVer) {
-            return WzCrypto.ClientVersion;
+        if (WzCrypto.EncVersion(WzCrypto.CLIENT_VERSION) == header.EncVer) {
+            return WzCrypto.CLIENT_VERSION;
         }
 
         if (firstMatch.HasValue) {
@@ -417,7 +417,7 @@ public class WzArchive : IDisposable {
                         continue;
                     case 2: {
                         int rel = r.ReadInt32();
-                        long atLong = (long) fstart + 1L + rel;
+                        long atLong = fstart + 1L + rel;
                         if (atLong < 1 || atLong >= data.Length) {
                             return false;
                         }
@@ -441,7 +441,7 @@ public class WzArchive : IDisposable {
                 if (effectiveTag != 3 || size != 0) {
                     allZeroSizeDirs = false;
                 }
-                if (effectiveTag != 3 && (size < 0 || offset >= (uint) data.Length || (long) offset + size > data.Length)) {
+                if (effectiveTag != 3 && (size < 0 || offset >= (uint) data.Length || offset + size > data.Length)) {
                     return false;
                 }
                 if (offset < minOffset) {
@@ -474,7 +474,7 @@ public class WzArchive : IDisposable {
 
             case 2: {
                 int rel = r.ReadInt32();
-                long atLong = (long) r.FStart + 1L + rel;
+                long atLong = r.FStart + 1L + rel;
                 if (atLong < 1 || atLong >= data.Length) {
                     throw WzException.UnexpectedEof((int) Math.Clamp(atLong, 0, int.MaxValue), 1, 0);
                 }

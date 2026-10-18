@@ -1,4 +1,5 @@
 using System.Collections;
+using System.ComponentModel.DataAnnotations;
 
 namespace Maple.Classic.File.IO;
 
@@ -6,6 +7,25 @@ namespace Maple.Classic.File.IO;
 /// A named property inside a WZ image or extended property list.
 /// </summary>
 public sealed record WzProperty(string Name, WzValue Value);
+
+/// <summary>
+/// WZ Canvas pixel formats: the format code stored with each <see cref="WzValue.Canvas"/> (format + format2 as one
+/// number). The <see cref="DisplayAttribute"/> names are human-readable labels for tools.
+/// </summary>
+public enum WzCanvasFormat {
+    [Display(Name = "BGRA4444 (16-bit)")]
+    Bgra4444 = 1,
+    [Display(Name = "BGRA8888 (32-bit)")]
+    Bgra8888 = 2,
+    [Display(Name = "BGR565 (16-bit)")]
+    Bgr565 = 513,
+    [Display(Name = "BGR565 Block16 (4-bit scale)")]
+    Bgr565Block16 = 517,
+    [Display(Name = "DXT3 / BC2")]
+    Dxt3 = 1026,
+    [Display(Name = "DXT5 / BC3")]
+    Dxt5 = 2050,
+}
 
 /// <summary>
 /// Represents a WZ image property value. Supports direct path navigation, implicit primitive conversions, in-place mutation, and binary/JSON serialization.
@@ -68,12 +88,12 @@ public abstract record WzValue : IEnumerable<WzProperty> {
     public sealed record Canvas(
         int width,
         int height,
-        int format,
+        WzCanvasFormat format,
         ReadOnlyMemory<byte> payload,
         List<WzProperty>? properties = null) : WzValue {
         public int Width { get; set; } = width;
         public int Height { get; set; } = height;
-        public int Format { get; set; } = format;
+        public WzCanvasFormat Format { get; set; } = format;
         public ReadOnlyMemory<byte> Payload { get; set; } = payload;
         public List<WzProperty> Properties { get; set => field = value ?? []; } = properties ?? [];
 
@@ -412,7 +432,7 @@ public abstract record WzValue : IEnumerable<WzProperty> {
         kids.Add(new WzProperty(name.ToString(), value));
     }
 
-    public bool ReplaceCanvasPixels(ReadOnlySpan<char> path, int width, int height, int format, ReadOnlyMemory<byte> payload) {
+    public bool ReplaceCanvasPixels(ReadOnlySpan<char> path, int width, int height, WzCanvasFormat format, ReadOnlyMemory<byte> payload) {
         if (Get(path) is Canvas canvas) {
             canvas.Width = width;
             canvas.Height = height;
@@ -484,15 +504,15 @@ public abstract record WzValue : IEnumerable<WzProperty> {
         return filled;
     }
 
-    public List<(string Path, int Width, int Height, int Format, int PayloadLength)> Canvases() {
-        var output = new List<(string Path, int Width, int Height, int Format, int PayloadLength)>();
+    public List<(string Path, int Width, int Height, WzCanvasFormat Format, int PayloadLength)> Canvases() {
+        var output = new List<(string Path, int Width, int Height, WzCanvasFormat Format, int PayloadLength)>();
         Walk(this, "", output);
         return output;
 
         static void Walk(
             WzValue v,
             string path,
-            List<(string Path, int Width, int Height, int Format, int PayloadLength)> acc) {
+            List<(string Path, int Width, int Height, WzCanvasFormat Format, int PayloadLength)> acc) {
             if (v is Canvas c) {
                 acc.Add((path, c.Width, c.Height, c.Format, c.Payload.Length));
             }

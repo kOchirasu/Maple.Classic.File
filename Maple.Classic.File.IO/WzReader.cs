@@ -149,7 +149,7 @@ internal ref struct WzReader(ReadOnlySpan<byte> data, uint fstart = 0, uint vers
             ReadOnlySpan<byte> raw = Take(n);
             return string.Create(n, raw, static (chars, src) => {
                 for (int k = 0; k < chars.Length; k++) {
-                    chars[k] = (char) (src[k] ^ unchecked((byte) (WzCrypto.AsciiMask + (byte) k)));
+                    chars[k] = (char) (src[k] ^ unchecked((byte) (WzCrypto.ASCII_MASK + (byte) k)));
                 }
             });
         } else {
@@ -163,7 +163,7 @@ internal ref struct WzReader(ReadOnlySpan<byte> data, uint fstart = 0, uint vers
             string result = string.Create(n, raw, static (units, src) => {
                 for (int k = 0; k < units.Length; k++) {
                     ushort u = BinaryPrimitives.ReadUInt16LittleEndian(src.Slice(k * 2, 2));
-                    units[k] = (char) (u ^ unchecked((ushort) (WzCrypto.UnicodeMask + (ushort) k)));
+                    units[k] = (char) (u ^ unchecked((ushort) (WzCrypto.UNICODE_MASK + (ushort) k)));
                 }
             });
 

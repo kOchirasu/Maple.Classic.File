@@ -90,7 +90,7 @@ internal static class WzImage {
                 }
                 int width = r.ReadCompressedInt32();
                 int height = r.ReadCompressedInt32();
-                int format = r.ReadCompressedInt32() + r.ReadByte();
+                var format = (WzCanvasFormat) (r.ReadCompressedInt32() + r.ReadByte());
                 r.ReadUInt32();
                 int rawLen = r.ReadInt32();
                 int dataLen = rawLen > 0 ? rawLen - 1 : 0;
@@ -245,7 +245,7 @@ internal static class WzImage {
                 }
                 w.CompressedI32(c.Width);
                 w.CompressedI32(c.Height);
-                w.CompressedI32(c.Format);
+                w.CompressedI32((int) c.Format);
                 w.U8(0);
                 w.U32(0);
                 w.I32(payloadSpan.Length + 1);
@@ -373,7 +373,7 @@ internal static class WzImage {
                 sb.Append(' ', pad2).Append("\"_canvas\": true,\n");
                 sb.Append(' ', pad2).Append("\"width\": ").Append(c.Width).Append(",\n");
                 sb.Append(' ', pad2).Append("\"height\": ").Append(c.Height).Append(",\n");
-                sb.Append(' ', pad2).Append("\"format\": ").Append(c.Format).Append(",\n");
+                sb.Append(' ', pad2).Append("\"format\": ").Append((int) c.Format).Append(",\n");
                 sb.Append(' ', pad2).Append("\"bytes\": ").Append(byteLen);
 
                 foreach (WzProperty child in c.Properties) {

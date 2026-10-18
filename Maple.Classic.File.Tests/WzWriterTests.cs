@@ -79,7 +79,7 @@ public class WzWriterTests {
         static WzValue.Canvas Stub(string link) => new(
             width: 1,
             height: 1,
-            format: 1,
+            format: WzCanvasFormat.Bgra4444,
             payload: new byte[10],
             properties: [
                 new WzProperty("origin", (-35, 11)),
@@ -95,7 +95,7 @@ public class WzWriterTests {
         // Also verify inlining directly against a WzArchive!
         byte[] targetPayload = Enumerable.Repeat((byte) 7, 226).ToArray();
         var canvasImg = new WzValue.Object {
-            ["5002828/stand0/0"] = new WzValue.Canvas(31, 24, 1, targetPayload),
+            ["5002828/stand0/0"] = new WzValue.Canvas(31, 24, WzCanvasFormat.Bgra4444, targetPayload),
         };
         using var canvasArchive = new WzArchive();
         canvasArchive.SetImage("01802653.img", canvasImg);
@@ -129,25 +129,25 @@ public class WzWriterTests {
             ["info/icon"] = new WzValue.Canvas(
                 1,
                 1,
-                1,
+                WzCanvasFormat.Bgra4444,
                 new byte[10],
                 [new WzProperty("origin", (-1, 30))]),
             ["info/cash"] = 1,
         };
 
         byte[] newPayload = Enumerable.Repeat((byte) 9, 44).ToArray();
-        Assert.True(img.ReplaceCanvasPixels("info/icon", 33, 33, 2, newPayload));
+        Assert.True(img.ReplaceCanvasPixels("info/icon", 33, 33, WzCanvasFormat.Bgra8888, newPayload));
 
         var icon = Assert.IsType<WzValue.Canvas>(img["info/icon"]);
-        Assert.Equal((33, 2, 44), (icon.Width, icon.Format, icon.Payload.Length));
+        Assert.Equal((33, WzCanvasFormat.Bgra8888, 44), (icon.Width, icon.Format, icon.Payload.Length));
         Assert.Equal((-1, 30), icon["origin"]?.AsVector());
 
-        Assert.False(img.ReplaceCanvasPixels("info/cash", 1, 1, 1, ReadOnlyMemory<byte>.Empty));
+        Assert.False(img.ReplaceCanvasPixels("info/cash", 1, 1, WzCanvasFormat.Bgra4444, ReadOnlyMemory<byte>.Empty));
         Assert.Equal(1, img["info/cash"]?.AsInt());
-        Assert.False(img.ReplaceCanvasPixels("info/nothing", 1, 1, 1, ReadOnlyMemory<byte>.Empty));
+        Assert.False(img.ReplaceCanvasPixels("info/nothing", 1, 1, WzCanvasFormat.Bgra4444, ReadOnlyMemory<byte>.Empty));
 
         WzValue back = WzValue.Parse(img.ToBytes());
-        Assert.Equal([("/info/icon", 33, 33, 2, 44)], back.Canvases());
+        Assert.Equal([("/info/icon", 33, 33, WzCanvasFormat.Bgra8888, 44)], back.Canvases());
     }
 
     [Fact]
@@ -194,7 +194,7 @@ public class WzWriterTests {
             ["info/icon"] = new WzValue.Canvas(
                 28,
                 28,
-                1,
+                WzCanvasFormat.Bgra4444,
                 Enumerable.Range(0, 120).Select(i => (byte) i).ToArray(),
                 [new WzProperty("origin", (-2, 28))]),
         };
